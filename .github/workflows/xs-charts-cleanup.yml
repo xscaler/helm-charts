@@ -46,7 +46,18 @@ jobs:
             printf '%s\n' "$out"
             exit 1
           fi
+          failed=0
+          deleted=0
           for id in $out; do
             echo "deleting version $id"
-            gh api -X DELETE "orgs/xscaler/packages/container/$pkg/versions/$id"
+            if gh api -X DELETE "orgs/xscaler/packages/container/$pkg/versions/$id" > /dev/null; then
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::could not delete version $id of $CHART"
+              failed=$((failed + 1))
+            fi
           done
+          echo "$CHART: deleted $deleted, failed $failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$failed" -gt 0 ]; then
+            exit 1
+          fi
