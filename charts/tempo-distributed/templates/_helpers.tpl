@@ -56,8 +56,16 @@ If release name contains chart name it will be used as a full name.
 Docker image selector for Tempo. Hierarchy based on global, component, and tempo values.
 */}}
 {{- define "tempo.tempoImage" -}}
-{{- /* global.image.registry wins over component and tempo.image.registry (same order as the loki chart), so a registry mirror covers every image. Default is docker.io. */ -}}
-{{- $registry := coalesce .global.registry .component.registry .tempo.registry "docker.io" -}}
+{{- /*
+Registry precedence is the upstream one (component, tempo.image, global) with two differences that keep
+tempo.image.registry (ghcr.io/xscaler) on the engine image only:
+- a global.image.registry other than the docker.io default (a user mirror) wins over tempo.image.registry;
+- images with their own repository (memcached, gateway, tempo-query, ...) do not inherit tempo.image.registry.
+*/ -}}
+{{- $global := .global.registry | default "docker.io" -}}
+{{- $mirror := ternary $global "" (ne $global "docker.io") -}}
+{{- $tempoRegistry := ternary "" (.tempo.registry | default "") (not (empty .component.repository)) -}}
+{{- $registry := coalesce .component.registry $mirror $tempoRegistry $global -}}
 {{- $repository := coalesce .component.repository .tempo.repository -}}
 {{- $tag := coalesce .component.tag .tempo.tag .defaultVersion | toString -}}
 {{- printf "%s/%s:%s" $registry $repository $tag -}}

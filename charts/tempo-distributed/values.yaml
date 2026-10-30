@@ -1,7 +1,7 @@
 global:
   image:
-    # -- Overrides the Docker registry globally for all images, excluding enterprise. Takes precedence over every component and `tempo.image.registry` value. Images without a registry of their own use docker.io.
-    registry: null
+    # -- Overrides the Docker registry globally for all images, excluding enterprise.
+    registry: docker.io
     # -- Optional list of imagePullSecrets for all images, excluding enterprise.
     # Names of existing secrets with private container registry credentials.
     # Ref: https://kubernetes.io/docs/concepts/containers/images/#specifying-imagepullsecrets-on-a-pod
@@ -1555,8 +1555,7 @@ queryFrontend:
     enabled: false
     image:
       # -- The Docker registry for the tempo-query image. Overrides `tempo.image.registry`
-      # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
-      registry: docker.io
+      registry: null
       # -- Optional list of imagePullSecrets. Overrides `tempo.image.pullSecrets`
       pullSecrets: []
       # -- Docker image repository for the tempo-query image. Overrides `tempo.image.repository`
@@ -2643,8 +2642,7 @@ memcached:
   enabled: true
   image:
     # -- The Docker registry for the Memcached image. Overrides `global.image.registry`
-    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
-    registry: docker.io
+    registry: null
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Memcached Docker image repository
@@ -2747,8 +2745,7 @@ memcachedExporter:
   #      - domain.tld
   image:
     # -- The Docker registry for the Memcached Exporter image. Overrides `global.image.registry`
-    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
-    registry: docker.io
+    registry: null
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Memcached Exporter Docker image repository
@@ -3179,8 +3176,7 @@ gateway:
   verboseLogging: true
   image:
     # -- The Docker registry for the gateway image. Overrides `global.image.registry`
-    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
-    registry: docker.io
+    registry: null
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- The gateway image repository
@@ -3641,7 +3637,7 @@ enterprise:
   enabled: false
 
   image:
-    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
+    # Pinned: this image is merged over tempo.image, whose registry points at ghcr.io/xscaler.
     registry: docker.io
     # -- Grafana Enterprise Traces container image repository. Note: for Grafana Tempo use the value 'image.repository'
     repository: grafana/enterprise-traces
