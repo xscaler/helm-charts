@@ -280,6 +280,7 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/published"
           helm pull "oci://$REPO/$CHART" --version "$VERSION" --untar --untardir "$RUNNER_TEMP/published"
           status=0
           files=("")
@@ -339,5 +340,6 @@ jobs:
             verify > /dev/null
           fi
           echo "$ref is signed by $IDENTITY"
+          mkdir -p "$RUNNER_TEMP/final"
           helm pull "oci://$REPO/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/final"
           echo "pulled $CHART $VERSION"
