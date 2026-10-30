@@ -282,6 +282,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/published"
           helm pull "oci://$REPO/$CHART" --version "$VERSION" --untar --untardir "$RUNNER_TEMP/published"
+          # Package the local chart under the published version so the chart labels compare equal.
+          helm package "charts/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/localpkg" > /dev/null
+          mkdir -p "$RUNNER_TEMP/local"
+          tar -xzf "$RUNNER_TEMP/localpkg/$CHART-${VERSION}.tgz" -C "$RUNNER_TEMP/local"
           status=0
           files=("")
           for f in "charts/$CHART"/ci/*-values.yaml; do
@@ -291,7 +295,7 @@ jobs:
             args=()
             [ -n "$f" ] && args=(--values "$f")
             helm template "$CHART" "$RUNNER_TEMP/published/$CHART" "${args[@]}" > "$RUNNER_TEMP/remote.yaml" 2> "$RUNNER_TEMP/remote.err" || true
-            helm template "$CHART" "charts/$CHART" "${args[@]}" > "$RUNNER_TEMP/local.yaml" 2> "$RUNNER_TEMP/local.err" || true
+            helm template "$CHART" "$RUNNER_TEMP/local/$CHART" "${args[@]}" > "$RUNNER_TEMP/local.yaml" 2> "$RUNNER_TEMP/local.err" || true
             if ! diff -u "$RUNNER_TEMP/remote.yaml" "$RUNNER_TEMP/local.yaml" > "$RUNNER_TEMP/render.diff" \
                 || ! diff -u "$RUNNER_TEMP/remote.err" "$RUNNER_TEMP/local.err" >> "$RUNNER_TEMP/render.diff"; then
               head -n 40 "$RUNNER_TEMP/render.diff"
