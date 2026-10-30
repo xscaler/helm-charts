@@ -250,14 +250,31 @@ jobs:
             fi
           done < "$RUNNER_TEMP/engine-images.txt"
 
-      # Absent means MANIFEST_UNKNOWN or NAME_UNKNOWN only. Denied or unauthorized is an error.
+      # Package first (404 means first publish), then the tag. Absent means MANIFEST_UNKNOWN or NAME_UNKNOWN only.
+      # Denied or unauthorized is an error.
       - name: Check whether the version exists
         id: exists
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ steps.meta.outputs.repo }}
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
+          pkg="${REPO#ghcr.io/xscaler/}/$CHART"
+          set +e
+          out="$(gh api "orgs/xscaler/packages/container/${pkg//\//%2F}" 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if printf '%s' "$out" | grep -q 'HTTP 404'; then
+              echo "package $pkg does not exist yet, first publish"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            printf '%s\n' "$out"
+            echo "::error::could not look up package $pkg"
+            exit 1
+          fi
           set +e
           out="$(crane manifest "$REPO/$CHART:$TAG" 2>&1)"
           rc=$?
@@ -272,7 +289,25 @@ jobs:
             exit 1
           fi
 
+      # Any run in the repo can write to GHCR and tags are mutable, so an existing version is accepted only if
+      # it carries a valid signature with this workflow's identity. It is never signed here.
+      - name: Verify the existing chart signature
+        if: steps.exists.outputs.exists == 'true'
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          IDENTITY: ${{ steps.meta.outputs.identity }}
+        run: |
+          set -euo pipefail
+          digest="$(crane digest "$REPO/$CHART:$TAG")"
+          if ! cosign verify "$REPO/$CHART@$digest" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity "$IDENTITY" > /dev/null; then
+            echo "::error::$REPO/$CHART:$TAG exists without trusted signature, investigate and bump +xs.n"
+            exit 1
+          fi
+          echo "$REPO/$CHART@$digest carries a valid signature from $IDENTITY"
+
       # A published version is immutable. If it exists, the local chart must render the same manifests.
+      # Randomly salted bcrypt hashes (htpasswd) are masked.
       - name: Compare with the published chart
         if: steps.exists.outputs.exists == 'true'
         env:
@@ -280,6 +315,8 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2016
+          mask() { sed -E 's/\$2[aby]\$[0-9]+\$[./A-Za-z0-9]{53}/BCRYPT/g'; }
           mkdir -p "$RUNNER_TEMP/published"
           helm pull "oci://$REPO/$CHART" --version "$VERSION" --untar --untardir "$RUNNER_TEMP/published"
           # Package the local chart under the published version so the chart labels compare equal.
@@ -294,10 +331,9 @@ jobs:
           for f in "${files[@]}"; do
             args=()
             [ -n "$f" ] && args=(--values "$f")
-            helm template "$CHART" "$RUNNER_TEMP/published/$CHART" "${args[@]}" > "$RUNNER_TEMP/remote.yaml" 2> "$RUNNER_TEMP/remote.err" || true
-            helm template "$CHART" "$RUNNER_TEMP/local/$CHART" "${args[@]}" > "$RUNNER_TEMP/local.yaml" 2> "$RUNNER_TEMP/local.err" || true
-            if ! diff -u "$RUNNER_TEMP/remote.yaml" "$RUNNER_TEMP/local.yaml" > "$RUNNER_TEMP/render.diff" \
-                || ! diff -u "$RUNNER_TEMP/remote.err" "$RUNNER_TEMP/local.err" >> "$RUNNER_TEMP/render.diff"; then
+            { helm template "$CHART" "$RUNNER_TEMP/published/$CHART" "${args[@]}" 2>&1 || true; } | mask > "$RUNNER_TEMP/remote.yaml"
+            { helm template "$CHART" "$RUNNER_TEMP/local/$CHART" "${args[@]}" 2>&1 || true; } | mask > "$RUNNER_TEMP/local.yaml"
+            if ! diff -u "$RUNNER_TEMP/remote.yaml" "$RUNNER_TEMP/local.yaml" > "$RUNNER_TEMP/render.diff"; then
               head -n 40 "$RUNNER_TEMP/render.diff"
               echo "::error::published $CHART $VERSION differs from the local chart (${f:-defaults}). Bump the chart version."
               status=1
@@ -306,6 +342,7 @@ jobs:
           exit "$status"
 
       - name: Package and push
+        id: push
         if: steps.exists.outputs.exists == 'false'
         env:
           REPO: ${{ steps.meta.outputs.repo }}
@@ -313,37 +350,38 @@ jobs:
         run: |
           set -euo pipefail
           helm package "charts/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/pkg"
-          helm push "$RUNNER_TEMP/pkg/$CHART-${VERSION}.tgz" "oci://$REPO"
+          out="$(helm push "$RUNNER_TEMP/pkg/$CHART-${VERSION}.tgz" "oci://$REPO" 2>&1)"
+          printf '%s\n' "$out"
+          digest="$(printf '%s\n' "$out" | sed -n 's/^Digest: *//p' | tail -n1)"
+          case "$digest" in sha256:*) ;; *) echo "::error::no digest in helm push output"; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # Sign what the registry holds, not what this run pushed. Only "no signatures found" means unsigned;
-      # any other verify failure, including a signature from another identity, fails the job.
-      - name: Sign and verify
+      # Only the digest this run pushed is signed, and the tag must still point at it.
+      - name: Sign and verify the pushed chart
+        if: steps.exists.outputs.exists == 'false'
         env:
           REPO: ${{ steps.meta.outputs.repo }}
           TAG: ${{ steps.meta.outputs.tag }}
-          VERSION: ${{ steps.meta.outputs.version }}
           IDENTITY: ${{ steps.meta.outputs.identity }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          digest="$(crane digest "$REPO/$CHART:$TAG")"
-          ref="$REPO/$CHART@$digest"
-          verify() {
-            cosign verify "$ref" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity "$IDENTITY"
-          }
-          set +e
-          out="$(verify 2>&1 > /dev/null)"
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            if ! printf '%s' "$out" | grep -q 'no signatures found'; then
-              printf '%s\n' "$out"
-              echo "::error::cosign verify failed for $ref"
-              exit 1
-            fi
-            cosign sign --yes "$ref"
-            verify > /dev/null
+          current="$(crane digest "$REPO/$CHART:$TAG")"
+          if [ "$current" != "$DIGEST" ]; then
+            echo "::error::$REPO/$CHART:$TAG points at $current, this run pushed $DIGEST"
+            exit 1
           fi
+          ref="$REPO/$CHART@$DIGEST"
+          cosign sign --yes "$ref"
+          cosign verify "$ref" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity "$IDENTITY" > /dev/null
           echo "$ref is signed by $IDENTITY"
+
+      - name: Pull the published chart
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/final"
           helm pull "oci://$REPO/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/final"
           echo "pulled $CHART $VERSION"

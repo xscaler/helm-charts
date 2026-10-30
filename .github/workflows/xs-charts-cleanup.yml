@@ -1,0 +1,52 @@
+name: xs-charts-cleanup
+# Deletes rehearsal chart versions older than 14 days from ghcr.io/xscaler/rehearsal/charts/*.
+# GitHub disables scheduled workflows after 60 days without repository activity.
+permissions: {}
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: xs-charts-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete old rehearsal charts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        chart: [loki, tempo-distributed]
+    steps:
+      - name: Delete versions older than 14 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHART: ${{ matrix.chart }}
+        run: |
+          set -euo pipefail
+          pkg="rehearsal%2Fcharts%2F$CHART"
+          cutoff="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          set +e
+          out="$(gh api --paginate "orgs/xscaler/packages/container/$pkg/versions?per_page=100" --jq ".[] | select(.created_at < \"$cutoff\") | .id" 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if printf '%s' "$out" | grep -q 'HTTP 404'; then
+              echo "no rehearsal package for $CHART yet"
+              exit 0
+            fi
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          for id in $out; do
+            echo "deleting version $id"
+            gh api -X DELETE "orgs/xscaler/packages/container/$pkg/versions/$id"
+          done
