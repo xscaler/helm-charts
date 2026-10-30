@@ -1,6 +1,6 @@
 name: xs-charts
 # xScaler chart pipeline for loki and tempo-distributed. Lint and template on
-# every push and pull request, publish to GHCR and ECR from main when the
+# every push and pull request, publish to GHCR from main when the
 # chart version is not in the registry yet. Upstream workflows stay untouched.
 permissions: {}
 
@@ -21,9 +21,6 @@ concurrency:
 
 env:
   GHCR_REGISTRY: ghcr.io/xscaler/charts
-  ECR_HOST: 483075907540.dkr.ecr.eu-west-1.amazonaws.com
-  ECR_REGISTRY: 483075907540.dkr.ecr.eu-west-1.amazonaws.com/xscaler/charts
-  AWS_REGION: eu-west-1
   HELM_VERSION: v4.3.1
   CT_VERSION: v3.15.0
   HELM_UNITTEST_VERSION: 1.2.1
@@ -274,64 +271,6 @@ jobs:
           digest="$(crane digest "$GHCR_REGISTRY/$CHART:$TAG")"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           ref="$GHCR_REGISTRY/$CHART@$digest"
-          set +e
-          out="$(cosign verify "$ref" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity-regexp "$CERT_IDENTITY" 2>&1)"
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            if ! printf '%s' "$out" | grep -Eqi 'no signatures found|no matching signatures'; then
-              printf '%s\n' "$out"
-              echo "::error::cosign verify failed for $ref for a reason other than a missing signature"
-              exit 1
-            fi
-            cosign sign --yes "$ref"
-            cosign verify "$ref" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity-regexp "$CERT_IDENTITY" > /dev/null
-          fi
-          echo "$ref is signed"
-
-      - name: Configure AWS credentials
-        id: aws
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.AWS_OPS_ECR_PUSH_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Explain AWS credential failure
-        if: failure() && steps.aws.outcome == 'failure'
-        run: |
-          echo "::error title=ECR publish blocked::Could not assume the ECR push role. The role, its trust for repo:xscaler/helm-charts:ref:refs/heads/main and the ECR repositories xscaler/charts/loki and xscaler/charts/tempo-distributed come from the pending terraform change. Apply it and re-run this workflow."
-
-      - name: Log in to ECR
-        run: |
-          set -euo pipefail
-          aws ecr get-login-password --region "$AWS_REGION" > "$RUNNER_TEMP/ecr-password"
-          crane auth login "$ECR_HOST" --username AWS --password-stdin < "$RUNNER_TEMP/ecr-password"
-          cosign login "$ECR_HOST" --username AWS --password-stdin < "$RUNNER_TEMP/ecr-password"
-          rm -f "$RUNNER_TEMP/ecr-password"
-
-      - name: Copy to ECR, sign and verify
-        env:
-          TAG: ${{ steps.meta.outputs.tag }}
-          SRC_DIGEST: ${{ steps.ghcr.outputs.digest }}
-        run: |
-          set -euo pipefail
-          set +e
-          out="$(crane digest "$ECR_REGISTRY/$CHART:$TAG" 2>&1)"
-          rc=$?
-          set -e
-          if [ "$rc" -eq 0 ]; then
-            if [ "$out" != "$SRC_DIGEST" ]; then
-              echo "::error::ECR $CHART:$TAG has digest $out but GHCR has $SRC_DIGEST (ECR tags are immutable)"
-              exit 1
-            fi
-          elif printf '%s' "$out" | grep -Eqi 'not found|404|manifest_unknown|name_unknown|name unknown|repositorynotfound'; then
-            crane copy "$GHCR_REGISTRY/$CHART@$SRC_DIGEST" "$ECR_REGISTRY/$CHART:$TAG"
-          else
-            printf '%s\n' "$out"
-            echo "::error::could not check ECR for $CHART:$TAG"
-            exit 1
-          fi
-          ref="$ECR_REGISTRY/$CHART@$SRC_DIGEST"
           set +e
           out="$(cosign verify "$ref" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity-regexp "$CERT_IDENTITY" 2>&1)"
           rc=$?
