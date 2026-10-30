@@ -1,0 +1,362 @@
+name: xs-charts
+# xScaler chart pipeline for loki and tempo-distributed. Lint and template on
+# every push and pull request, publish to GHCR and ECR from main when the
+# chart version is not in the registry yet. Upstream workflows stay untouched.
+permissions: {}
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: xs-charts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  GHCR_REGISTRY: ghcr.io/xscaler/charts
+  ECR_HOST: 483075907540.dkr.ecr.eu-west-1.amazonaws.com
+  ECR_REGISTRY: 483075907540.dkr.ecr.eu-west-1.amazonaws.com/xscaler/charts
+  AWS_REGION: eu-west-1
+  HELM_VERSION: v4.3.1
+  CT_VERSION: v3.15.0
+  HELM_UNITTEST_VERSION: 1.2.1
+  HELM_SCHEMA_VERSION: 2.6.0
+  CRANE_VERSION: v0.22.1
+
+jobs:
+  lint:
+    name: Lint and unit test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
+        with:
+          version: ${{ env.CT_VERSION }}
+
+      - name: Install helm-unittest plugin
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --version "$HELM_UNITTEST_VERSION" --verify=false
+
+      - name: Install helm values-schema plugin
+        run: helm plugin install https://github.com/losisin/helm-values-schema-json.git --version "$HELM_SCHEMA_VERSION" --verify=false
+
+      # ct.yaml (upstream) runs ci/lint.sh and `helm unittest --strict` as additional commands.
+      # The version bump check compares against main, which is meaningless for a fork that
+      # carries the bump itself, so it is off.
+      - name: ct lint
+        run: |
+          ct lint \
+            --config .github/linters/ct.yaml \
+            --charts charts/loki,charts/tempo-distributed \
+            --check-version-increment=false
+
+  template:
+    name: Template (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chart: loki
+            engine: loki
+          - chart: tempo-distributed
+            engine: tempo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm dependency update
+        env:
+          CHART: ${{ matrix.chart }}
+        run: helm dependency update "charts/$CHART"
+
+      - name: helm lint
+        env:
+          CHART: ${{ matrix.chart }}
+        run: |
+          helm lint "charts/$CHART"
+          for f in "charts/$CHART"/ci/*-values.yaml; do
+            [ -f "$f" ] || continue
+            helm lint "charts/$CHART" --values "$f"
+          done
+
+      # Renders the chart with every ci/*-values.yaml (the defaults need storage settings), then checks that
+      # the engine image comes from ghcr.io/xscaler and no upstream engine image is left.
+      - name: helm template and image check
+        env:
+          CHART: ${{ matrix.chart }}
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          set -euo pipefail
+          status=0
+          files=()
+          for f in "charts/$CHART"/ci/*-values.yaml; do
+            [ -f "$f" ] && files+=("$f")
+          done
+          # Charts without ci values are rendered with their defaults.
+          [ "${#files[@]}" -gt 0 ] || files=("")
+          for f in "${files[@]}"; do
+            args=()
+            [ -n "$f" ] && args=(--values "$f")
+            echo "::group::helm template $CHART ${f:-defaults}"
+            if ! helm template "$CHART" "charts/$CHART" --namespace xs "${args[@]}" > rendered.yaml; then
+              echo "::error::helm template failed for $CHART ${f:-defaults}"
+              status=1
+              echo "::endgroup::"
+              continue
+            fi
+            if grep -E "^\s*-?\s*image:.*grafana/${ENGINE}([:@\"' ]|$)" rendered.yaml; then
+              echo "::error::upstream grafana/${ENGINE} image rendered for $CHART ${f:-defaults}"
+              status=1
+            fi
+            if ! grep -Eq "image:.*ghcr\.io/xscaler/${ENGINE}:" rendered.yaml; then
+              echo "::error::no ghcr.io/xscaler/${ENGINE} image rendered for $CHART ${f:-defaults}"
+              status=1
+            fi
+            grep -E "^\s*-?\s*image:.*/${ENGINE}[:@]" rendered.yaml | sort -u
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  publish-ghcr:
+    name: Publish ${{ matrix.chart }} to GHCR
+    needs: [lint, template]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: xs-charts-publish-ghcr-${{ matrix.chart }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        chart: [loki, tempo-distributed]
+    env:
+      CHART: ${{ matrix.chart }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Log in to GHCR
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          printf '%s' "$REGISTRY_TOKEN" | cosign login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      - name: Resolve chart version
+        id: meta
+        run: |
+          version="$(helm show chart "charts/$CHART" | sed -n 's/^version: *//p' | tr -d '"' )"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Chart $CHART version $version"
+
+      - name: Check whether the version is already in GHCR
+        id: exists
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set +e
+          out="$(helm show chart "oci://$GHCR_REGISTRY/$CHART" --version "$VERSION" 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$CHART $VERSION is already in GHCR, nothing to push"
+          elif printf '%s' "$out" | grep -Eqi 'not found|404|manifest unknown|name unknown'; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$out"
+            echo "::error::could not check GHCR for $CHART $VERSION"
+            exit 1
+          fi
+
+      - name: Package and push
+        id: push
+        if: steps.exists.outputs.published == 'false'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm dependency update "charts/$CHART"
+          helm package "charts/$CHART" --destination "$RUNNER_TEMP/pkg"
+          out="$(helm push "$RUNNER_TEMP/pkg/$CHART-$VERSION.tgz" "oci://$GHCR_REGISTRY" 2>&1)"
+          printf '%s\n' "$out"
+          digest="$(printf '%s\n' "$out" | sed -n 's/^Digest: *//p' | tail -n1)"
+          case "$digest" in sha256:*) ;; *) echo "::error::no digest in helm push output"; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign chart
+        if: steps.exists.outputs.published == 'false'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$GHCR_REGISTRY/$CHART@$DIGEST"
+
+      - name: Verify signature
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          cosign verify "$GHCR_REGISTRY/$CHART:$VERSION" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/xscaler/helm-charts/\.github/workflows/xs-charts\.yml@refs/heads/main$' \
+            > /dev/null
+
+  publish-ecr:
+    name: Publish ${{ matrix.chart }} to ECR
+    needs: [publish-ghcr]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: xs-charts-publish-ecr-${{ matrix.chart }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        chart: [loki, tempo-distributed]
+    env:
+      CHART: ${{ matrix.chart }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        with:
+          version: ${{ env.CRANE_VERSION }}
+
+      - name: Configure AWS credentials
+        id: aws
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_OPS_ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Explain AWS credential failure
+        if: failure() && steps.aws.outcome == 'failure'
+        run: |
+          echo "::error title=ECR publish blocked::Could not assume the ECR push role. The role, its trust for repo:xscaler/helm-charts:ref:refs/heads/main and the ECR repositories xscaler/charts/loki and xscaler/charts/tempo-distributed come from the pending terraform change. Apply it and re-run this workflow."
+
+      - name: Log in to registries
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | crane auth login ghcr.io --username "$GHCR_USER" --password-stdin
+          aws ecr get-login-password --region "$AWS_REGION" > "$RUNNER_TEMP/ecr-password"
+          crane auth login "$ECR_HOST" --username AWS --password-stdin < "$RUNNER_TEMP/ecr-password"
+          cosign login "$ECR_HOST" --username AWS --password-stdin < "$RUNNER_TEMP/ecr-password"
+          rm -f "$RUNNER_TEMP/ecr-password"
+
+      - name: Resolve chart version
+        id: meta
+        run: |
+          version="$(helm show chart "charts/$CHART" | sed -n 's/^version: *//p' | tr -d '"')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Copy GHCR digest to ECR
+        id: copy
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          src_digest="$(crane digest "$GHCR_REGISTRY/$CHART:$VERSION")"
+          echo "GHCR digest: $src_digest"
+          if dst_digest="$(crane digest "$ECR_REGISTRY/$CHART:$VERSION" 2>/dev/null)"; then
+            if [ "$dst_digest" != "$src_digest" ]; then
+              echo "::error::ECR $CHART:$VERSION exists with digest $dst_digest, GHCR has $src_digest (ECR tags are immutable)"
+              exit 1
+            fi
+            echo "ECR already has $CHART:$VERSION at the same digest"
+          else
+            crane copy "$GHCR_REGISTRY/$CHART@$src_digest" "$ECR_REGISTRY/$CHART:$VERSION"
+          fi
+          echo "digest=$src_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in ECR if unsigned
+        env:
+          DIGEST: ${{ steps.copy.outputs.digest }}
+        run: |
+          if cosign verify "$ECR_REGISTRY/$CHART@$DIGEST" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp '^https://github\.com/xscaler/helm-charts/\.github/workflows/xs-charts\.yml@refs/heads/main$' \
+              > /dev/null 2>&1; then
+            echo "already signed"
+          else
+            cosign sign --yes "$ECR_REGISTRY/$CHART@$DIGEST"
+          fi
+
+      - name: Verify ECR copy
+        env:
+          DIGEST: ${{ steps.copy.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(crane digest "$ECR_REGISTRY/$CHART:$VERSION")" = "$DIGEST"
+          cosign verify "$ECR_REGISTRY/$CHART@$DIGEST" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/xscaler/helm-charts/\.github/workflows/xs-charts\.yml@refs/heads/main$' \
+            > /dev/null
