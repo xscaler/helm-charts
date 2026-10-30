@@ -391,7 +391,10 @@ jobs:
           helm package "charts/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/localpkg" > /dev/null
           tar -xzf "$RUNNER_TEMP/localpkg/$CHART-${VERSION}.tgz" -C "$RUNNER_TEMP/local"
           status=0
-          if ! diff -r "$RUNNER_TEMP/published/$CHART" "$RUNNER_TEMP/local/$CHART" > "$RUNNER_TEMP/files.diff"; then
+          # Chart.lock carries a generation timestamp, so it is compared without that line.
+          if ! { diff -r -x Chart.lock "$RUNNER_TEMP/published/$CHART" "$RUNNER_TEMP/local/$CHART" \
+              && diff <(grep -v '^generated:' "$RUNNER_TEMP/published/$CHART/Chart.lock") \
+                      <(grep -v '^generated:' "$RUNNER_TEMP/local/$CHART/Chart.lock"); } > "$RUNNER_TEMP/files.diff"; then
             head -n 40 "$RUNNER_TEMP/files.diff"
             echo "::error::published $CHART $VERSION has different package files than the local chart. Publish a new build number (+xs.N)."
             status=1
