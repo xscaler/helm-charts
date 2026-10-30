@@ -88,3 +88,21 @@ tests:
           path: spec.template.spec.containers[0].image
           value: other.reg/xscaler/loki:1.2.3-xs.4
         template: monolithic/workload.yaml
+
+  - it: treats an empty registry like the upstream default
+    set:
+      loki.image.registry: ""
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/loki:3.7.9-xs.0
+        template: monolithic/workload.yaml
+
+  - it: treats a null registry like the upstream default
+    set:
+      loki.image.registry: null
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/loki:3.7.9-xs.0
+        template: monolithic/workload.yaml

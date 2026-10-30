@@ -214,7 +214,7 @@ Parameters:
 
 {{- /*
 xscaler fork: the default engine repository is xscaler/loki. When an image still uses that repository, the
-upstream default registry (docker.io, nothing else set) becomes xscaler.engineRegistry and an image tag that
+upstream default registry (docker.io or none, nothing else set) becomes xscaler.engineRegistry and an image tag that
 fell back to the appVersion becomes xscaler.engineTag. Overrides of registry, repository, tag or digest are
 left exactly as upstream resolves them.
 */ -}}
@@ -223,7 +223,7 @@ left exactly as upstream resolves them.
 {{- $xs = $ctx.Values.xscaler | default dict -}}
 {{- end -}}
 {{- if and $xs.engineRegistry (eq $repository "xscaler/loki") -}}
-{{- if eq $registry "docker.io" -}}
+{{- if or (empty $registry) (eq $registry "docker.io") -}}
 {{- $registry = $xs.engineRegistry -}}
 {{- end -}}
 {{- if and $xs.engineTag (empty $digestRef) (empty (coalesce $component.tag $default.tag "")) -}}
