@@ -93,7 +93,9 @@ jobs:
       - name: helm dependency build
         env:
           CHART: ${{ matrix.chart }}
-        run: helm dependency build "charts/$CHART"
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm dependency build "charts/$CHART"
 
       - name: helm lint
         env:
@@ -229,7 +231,9 @@ jobs:
           printf '%s' "$REGISTRY_TOKEN" | cosign login ghcr.io --username "$REGISTRY_USER" --password-stdin
 
       - name: helm dependency build
-        run: helm dependency build "charts/$CHART"
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm dependency build "charts/$CHART"
 
       # Every ghcr.io/xscaler/<engine> image any ci values file renders must exist and be one the engine
       # release workflow built: cosign verify with the exact engine release identity plus a build provenance
