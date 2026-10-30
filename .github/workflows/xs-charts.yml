@@ -8,9 +8,11 @@ on:
   push:
     branches:
       - main
+      - 'ci/**'
   pull_request:
     branches:
       - main
+      - 'ci/**'
   workflow_dispatch:
 
 concurrency:
