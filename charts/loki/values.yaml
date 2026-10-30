@@ -258,7 +258,7 @@ loki:
     repository: xscaler/loki
     # @schema type:[string, null]
     # -- Overrides the image tag whose default is the chart's appVersion
-    tag: null
+    tag: 3.7.9-xs.0
     # @schema type:[string, null]
     # -- Overrides the image tag with an image digest
     digest: null
@@ -1069,8 +1069,8 @@ lokiCanary:
     # -- Docker image repository
     repository: grafana/loki-canary
     # @schema type:[string, null]
-    # -- Overrides the image tag. Pinned to the upstream release because the chart's appVersion carries the -xs suffix
-    tag: 3.7.9
+    # -- Overrides the image tag whose default is the chart's appVersion
+    tag: null
     # @schema type:[string, null]
     # -- Overrides the image tag with an image digest
     digest: null

@@ -1,7 +1,7 @@
 global:
   image:
-    # -- Overrides the Docker registry globally for all images, excluding enterprise.
-    registry: docker.io
+    # -- Overrides the Docker registry globally for all images, excluding enterprise. Takes precedence over every component and `tempo.image.registry` value. Images without a registry of their own use docker.io.
+    registry: null
     # -- Optional list of imagePullSecrets for all images, excluding enterprise.
     # Names of existing secrets with private container registry credentials.
     # Ref: https://kubernetes.io/docs/concepts/containers/images/#specifying-imagepullsecrets-on-a-pod
@@ -82,7 +82,7 @@ tempo:
     # -- Docker image repository
     repository: xscaler/tempo
     # -- Overrides the image tag whose default is the chart's appVersion
-    tag: null
+    tag: 3.1.1-xs.0
     pullPolicy: IfNotPresent
   # -- Liveness probe for all Tempo binary pods. Deep-merged over `defaults.livenessProbe`.
   livenessProbe: {}
@@ -1562,6 +1562,7 @@ queryFrontend:
       # -- Docker image repository for the tempo-query image. Overrides `tempo.image.repository`
       repository: grafana/tempo-query
       # -- Docker image tag for the tempo-query image. Overrides `tempo.image.tag`
+      # Pinned to the upstream release: it would otherwise inherit tempo.image.tag, which is our -xs build of the engine.
       tag: 3.1.1
     # -- Resource requests and limits for the query
     resources: {}
@@ -3640,6 +3641,8 @@ enterprise:
   enabled: false
 
   image:
+    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
+    registry: docker.io
     # -- Grafana Enterprise Traces container image repository. Note: for Grafana Tempo use the value 'image.repository'
     repository: grafana/enterprise-traces
     # -- Grafana Enterprise Traces container image tag. Note: for Grafana Tempo use the value 'image.tag'

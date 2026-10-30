@@ -6617,7 +6617,7 @@
                             "type": "string"
                         },
                         "tag": {
-                            "description": "Overrides the image tag. Pinned to the upstream release because the chart's appVersion carries the -xs suffix",
+                            "description": "Overrides the image tag whose default is the chart's appVersion",
                             "type": [
                                 "string",
                                 "null"
