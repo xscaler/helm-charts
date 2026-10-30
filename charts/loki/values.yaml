@@ -253,9 +253,9 @@ loki:
   startupProbe: {}
   image:
     # -- The Docker registry
-    registry: docker.io
+    registry: ghcr.io
     # -- Docker image repository
-    repository: grafana/loki
+    repository: xscaler/loki
     # @schema type:[string, null]
     # -- Overrides the image tag whose default is the chart's appVersion
     tag: null
@@ -1069,8 +1069,8 @@ lokiCanary:
     # -- Docker image repository
     repository: grafana/loki-canary
     # @schema type:[string, null]
-    # -- Overrides the image tag whose default is the chart's appVersion
-    tag: null
+    # -- Overrides the image tag. Pinned to the upstream release because the chart's appVersion carries the -xs suffix
+    tag: 3.7.9
     # @schema type:[string, null]
     # -- Overrides the image tag with an image digest
     digest: null

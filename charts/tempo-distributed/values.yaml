@@ -76,11 +76,11 @@ tempo:
   dnsConfig: {}
   image:
     # -- The Docker registry. Overrides `global.image.registry`
-    registry: null
+    registry: ghcr.io
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Docker image repository
-    repository: grafana/tempo
+    repository: xscaler/tempo
     # -- Overrides the image tag whose default is the chart's appVersion
     tag: null
     pullPolicy: IfNotPresent
@@ -1555,13 +1555,14 @@ queryFrontend:
     enabled: false
     image:
       # -- The Docker registry for the tempo-query image. Overrides `tempo.image.registry`
-      registry: null
+      # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
+      registry: docker.io
       # -- Optional list of imagePullSecrets. Overrides `tempo.image.pullSecrets`
       pullSecrets: []
       # -- Docker image repository for the tempo-query image. Overrides `tempo.image.repository`
       repository: grafana/tempo-query
       # -- Docker image tag for the tempo-query image. Overrides `tempo.image.tag`
-      tag: null
+      tag: 3.1.1
     # -- Resource requests and limits for the query
     resources: {}
     # -- Additional CLI args for tempo-query pods
@@ -2641,7 +2642,8 @@ memcached:
   enabled: true
   image:
     # -- The Docker registry for the Memcached image. Overrides `global.image.registry`
-    registry: null
+    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
+    registry: docker.io
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Memcached Docker image repository
@@ -2744,7 +2746,8 @@ memcachedExporter:
   #      - domain.tld
   image:
     # -- The Docker registry for the Memcached Exporter image. Overrides `global.image.registry`
-    registry: null
+    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
+    registry: docker.io
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Memcached Exporter Docker image repository
@@ -3175,7 +3178,8 @@ gateway:
   verboseLogging: true
   image:
     # -- The Docker registry for the gateway image. Overrides `global.image.registry`
-    registry: null
+    # Pinned: tempo.image.registry is the fallback for this image and points at ghcr.io/xscaler.
+    registry: docker.io
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- The gateway image repository
