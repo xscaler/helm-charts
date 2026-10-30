@@ -1,3 +1,11 @@
+# xscaler fork: defaults for the engine image built at github.com/xscaler. They apply only while the engine
+# repository is still the xscaler default and no registry or tag is set for it; any override wins as upstream.
+xscaler:
+  # -- Registry for the default xscaler engine image. Used when no registry is set for it.
+  engineRegistry: ghcr.io
+  # -- Tag for the default xscaler engine image. Used when no tag is set for it.
+  engineTag: 3.1.1-xs.0
+
 global:
   image:
     # -- Overrides the Docker registry globally for all images, excluding enterprise.
@@ -76,13 +84,13 @@ tempo:
   dnsConfig: {}
   image:
     # -- The Docker registry. Overrides `global.image.registry`
-    registry: ghcr.io
+    registry: null
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Docker image repository
     repository: xscaler/tempo
     # -- Overrides the image tag whose default is the chart's appVersion
-    tag: 3.1.1-xs.0
+    tag: null
     pullPolicy: IfNotPresent
   # -- Liveness probe for all Tempo binary pods. Deep-merged over `defaults.livenessProbe`.
   livenessProbe: {}
@@ -1561,8 +1569,7 @@ queryFrontend:
       # -- Docker image repository for the tempo-query image. Overrides `tempo.image.repository`
       repository: grafana/tempo-query
       # -- Docker image tag for the tempo-query image. Overrides `tempo.image.tag`
-      # Pinned to the upstream release: it would otherwise inherit tempo.image.tag, which is our -xs build of the engine.
-      tag: 3.1.1
+      tag: null
     # -- Resource requests and limits for the query
     resources: {}
     # -- Additional CLI args for tempo-query pods
@@ -3637,8 +3644,6 @@ enterprise:
   enabled: false
 
   image:
-    # Pinned: this image is merged over tempo.image, whose registry points at ghcr.io/xscaler.
-    registry: docker.io
     # -- Grafana Enterprise Traces container image repository. Note: for Grafana Tempo use the value 'image.repository'
     repository: grafana/enterprise-traces
     # -- Grafana Enterprise Traces container image tag. Note: for Grafana Tempo use the value 'image.tag'

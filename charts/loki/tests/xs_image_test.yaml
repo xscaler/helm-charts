@@ -1,0 +1,90 @@
+# $schema: https://raw.githubusercontent.com/helm-unittest/helm-unittest/refs/heads/main/schema/helm-testsuite.json
+suite: xscaler engine image
+templates:
+  - monolithic/workload.yaml
+  - loki-canary/daemonset.yaml
+  - config.yaml
+set:
+  deploymentMode: Monolithic
+  loki.useTestSchema: true
+  loki.storage.bucketNames.chunks: chunks
+  loki.storage.bucketNames.ruler: ruler
+
+tests:
+  - it: defaults to the xscaler engine registry and tag
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/loki:3.7.9-xs.0
+        template: monolithic/workload.yaml
+
+  - it: keeps the upstream version label
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/version"]
+          value: "3.7.9"
+        template: monolithic/workload.yaml
+
+  - it: keeps the canary image on upstream
+    set:
+      monitoring.lokiCanary.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/grafana/loki-canary:3.7.9
+        template: loki-canary/daemonset.yaml
+
+  - it: uses the global registry with the xscaler repository and tag
+    set:
+      global.imageRegistry: mirror.local
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mirror.local/xscaler/loki:3.7.9-xs.0
+        template: monolithic/workload.yaml
+
+  - it: keeps a user registry and swaps only the tag
+    set:
+      loki.image.registry: my.reg
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: my.reg/xscaler/loki:3.7.9-xs.0
+        template: monolithic/workload.yaml
+
+  - it: keeps a user tag
+    set:
+      loki.image.tag: 9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/loki:9.9.9
+        template: monolithic/workload.yaml
+
+  - it: leaves a user digest alone
+    set:
+      loki.image.digest: sha256:abc
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/loki@sha256:abc
+        template: monolithic/workload.yaml
+
+  - it: leaves a repository override exactly as upstream
+    set:
+      singleBinary.image.repository: custom/loki
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/custom/loki:3.7.9
+        template: monolithic/workload.yaml
+
+  - it: honours xscaler.engineRegistry and xscaler.engineTag
+    set:
+      xscaler.engineRegistry: other.reg
+      xscaler.engineTag: 1.2.3-xs.4
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: other.reg/xscaler/loki:1.2.3-xs.4
+        template: monolithic/workload.yaml

@@ -12497,6 +12497,19 @@
                     }
                 }
             }
+        },
+        "xscaler": {
+            "type": "object",
+            "properties": {
+                "engineRegistry": {
+                    "description": "Registry for the default xscaler engine image. Used when no registry is set for it.",
+                    "type": "string"
+                },
+                "engineTag": {
+                    "description": "Tag for the default xscaler engine image. Used when no tag is set for it.",
+                    "type": "string"
+                }
+            }
         }
     },
     "additionalProperties": false,

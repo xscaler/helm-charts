@@ -11,6 +11,14 @@ kubeVersionOverride: ""
 # without failing schema validation.
 enabled: true
 
+# xscaler fork: defaults for the engine image built at github.com/xscaler. They apply only while the engine
+# repository is still the xscaler default and no registry or tag is set for it; any override wins as upstream.
+xscaler:
+  # -- Registry for the default xscaler engine image. Used when no registry is set for it.
+  engineRegistry: ghcr.io
+  # -- Tag for the default xscaler engine image. Used when no tag is set for it.
+  engineTag: 3.7.9-xs.0
+
 global:
   # @schema type:[string, null]
   # -- Overrides the Docker registry globally for all images (standard format).
@@ -253,12 +261,12 @@ loki:
   startupProbe: {}
   image:
     # -- The Docker registry
-    registry: ghcr.io
+    registry: docker.io
     # -- Docker image repository
     repository: xscaler/loki
     # @schema type:[string, null]
     # -- Overrides the image tag whose default is the chart's appVersion
-    tag: 3.7.9-xs.0
+    tag: null
     # @schema type:[string, null]
     # -- Overrides the image tag with an image digest
     digest: null
