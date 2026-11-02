@@ -45,6 +45,15 @@
 # its tip is still the bot's own commit); otherwise the PR gets a comment that it needs a
 # manual update. A sync PR that was closed without merging is skipped, not re-opened.
 #
+# Namespace: upstream never owns xs-* workflows, scripts or actions. build fails when
+# upstream main carries such a path or the result would change main's; the mirror still
+# copies upstream refs but fails the run when upstream main or a new tag holds one; an
+# xs-* workflow that upstream main or main's upstream base also has is disabled like any
+# upstream one.
+#
+# An upstream refresh PR closed without merging is skipped for that upstream main tip
+# (the PR body carries it as an xs-sync:upstream marker), not only for that day.
+#
 # Sync PRs must be merged with a merge commit: the next sync derives the upstream main
 # commit main is built on from main's history.
 name: xs-sync
@@ -349,9 +358,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0 # upstream/main and the upstream base commit decide which xs-* workflows are ours
           persist-credentials: false
 
-      - name: Disable every workflow that is not xs-*
+      - name: Disable every workflow that is not ours
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           GH_REPO: ${{ github.repository }}
