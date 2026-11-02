@@ -1,0 +1,104 @@
+# xScaler fork: validate upstream sync PRs and test the sync scripts.
+#
+# unit         shellcheck and table tests for xs-sync.sh (every PR, and ci/** pushes).
+# identity     sync/* PRs only (checker script taken from the base sha): outside our two
+#              charts and the xs files the tree equals the upstream main commit the sync
+#              used, each chart equals its chart tag except our chart patch paths, the
+#              merge parents are main and upstream main, chart version, appVersion and
+#              engine tag agree, and the engine tag still resolves to the digest the sync
+#              recorded in the PR body, which is signed and attested (cosign and the
+#              provenance attestation) with the engine release identity.
+#
+# There is no binary in this repository, so unlike the engine forks there is no flag
+# diff. The regular xs-charts run (lint, unit tests, template) covers sync PRs like any
+# other PR.
+name: xs-sync-check
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - "ci/**"
+
+permissions: {}
+
+concurrency:
+  group: xs-sync-check-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: sync script tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck
+        run: .github/scripts/xs-install-tool.sh shellcheck
+
+      - name: shellcheck
+        run: shellcheck -x .github/scripts/xs-sync.sh .github/scripts/xs-sync-test.sh
+
+      - name: Selection and helper tests
+        run: .github/scripts/xs-sync-test.sh
+
+  identity:
+    name: identity with upstream
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'sync/') && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read # engine registry login and attestation lookup
+    steps:
+      # The checker comes from the base branch; the PR head is only data it inspects.
+      - name: Checkout the checker from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install crane and cosign
+        env:
+          INSTALLER: ${{ github.workspace }}/trusted/.github/scripts/xs-install-tool.sh
+        run: |
+          set -euo pipefail
+          "${INSTALLER}" crane
+          "${INSTALLER}" cosign
+
+      - name: Check
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECKER: ${{ github.workspace }}/trusted/.github/scripts/xs-sync.sh
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/pr-body.md"
+          "${CHECKER}" ghcr-login
+          cd head
+          git rev-parse --verify --quiet "origin/main" > /dev/null
+          git rev-parse --verify --quiet "origin/upstream/main" > /dev/null
+          "${CHECKER}" check identity "${HEAD_SHA}"
+          "${CHECKER}" check parents "${HEAD_SHA}"
+          "${CHECKER}" check charts "${HEAD_SHA}" "${RUNNER_TEMP}/pr-body.md"
