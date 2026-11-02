@@ -1,0 +1,481 @@
+name: xs-charts
+# xScaler chart pipeline for loki and tempo-distributed. Lint and template on
+# every push and pull request. Pushes to main publish to
+# oci://ghcr.io/xscaler/charts (release). Pushes to ci/** run the same
+# publish path against oci://ghcr.io/xscaler/rehearsal/charts with a
+# rehearsal version (rehearsal). Upstream workflows stay untouched.
+#
+# Chart versions look like 20.1.0+xs.0. "+xs.N" is semver build metadata: it has no
+# effect on precedence, so 20.1.0+xs.0 and 20.1.0+xs.1 (and the upstream 20.1.0)
+# compare equal. Consumers must pin the exact chart version.
+permissions: {}
+
+on:
+  push:
+    branches:
+      - main
+      - 'ci/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: xs-charts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  PYTHON_YAMALE: '6.1.0'
+  PYTHON_YAMLLINT: '1.38.0'
+
+jobs:
+  lint:
+    name: Lint and unit test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Install pinned tools
+        id: tools
+        uses: ./.github/actions/xs-tools
+
+      - name: Install ct python dependencies
+        run: pip install "yamale==$PYTHON_YAMALE" "yamllint==$PYTHON_YAMLLINT"
+
+      # ct.yaml (upstream) runs ci/lint.sh and `helm unittest --strict` as additional commands.
+      # The version bump check compares against main, which is meaningless for a fork that
+      # carries the bump itself, so it is off.
+      - name: ct lint
+        env:
+          CT_ETC: ${{ steps.tools.outputs.ct-etc }}
+        run: |
+          ct lint \
+            --config .github/linters/ct.yaml \
+            --charts charts/loki,charts/tempo-distributed \
+            --check-version-increment=false \
+            --chart-yaml-schema "$CT_ETC/chart_schema.yaml" \
+            --lint-conf "$CT_ETC/lintconf.yaml"
+
+  template:
+    name: Template (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chart: loki
+            engine: loki
+          - chart: tempo-distributed
+            engine: tempo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned tools
+        uses: ./.github/actions/xs-tools
+
+      - name: helm dependency build
+        env:
+          CHART: ${{ matrix.chart }}
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm dependency build "charts/$CHART"
+
+      - name: helm lint
+        env:
+          CHART: ${{ matrix.chart }}
+        run: |
+          helm lint "charts/$CHART"
+          for f in "charts/$CHART"/ci/*-values.yaml; do
+            [ -f "$f" ] || continue
+            helm lint "charts/$CHART" --values "$f"
+          done
+
+      # Renders the chart with every ci/*-values.yaml (the defaults need storage settings), then checks that
+      # the engine image comes from ghcr.io/xscaler and no upstream engine image is left.
+      - name: helm template and image check
+        env:
+          CHART: ${{ matrix.chart }}
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          set -euo pipefail
+          status=0
+          APP_VERSION="$(helm show chart "charts/$CHART" | sed -n 's/^appVersion: *//p' | tr -d '"')"
+          files=()
+          for f in "charts/$CHART"/ci/*-values.yaml; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
+          # Charts without ci values are rendered with their defaults.
+          if [ "${#files[@]}" -eq 0 ]; then files=(""); fi
+          for f in "${files[@]}"; do
+            args=()
+            if [ -n "$f" ]; then args=(--values "$f"); fi
+            echo "::group::helm template $CHART ${f:-defaults}"
+            if ! helm template "$CHART" "charts/$CHART" --namespace xs "${args[@]}" > rendered.yaml; then
+              echo "::error::helm template failed for $CHART ${f:-defaults}"
+              status=1
+              echo "::endgroup::"
+              continue
+            fi
+            if grep -E "^\s*-?\s*image:.*grafana/${ENGINE}([:@\"' ]|$)" rendered.yaml; then
+              echo "::error::upstream grafana/${ENGINE} image rendered for $CHART ${f:-defaults}"
+              status=1
+            fi
+            if ! grep -Eq "image:.*ghcr\.io/xscaler/${ENGINE}:" rendered.yaml; then
+              echo "::error::no ghcr.io/xscaler/${ENGINE} image rendered for $CHART ${f:-defaults}"
+              status=1
+            fi
+            grep -E "^\s*-?\s*image:.*/${ENGINE}[:@]" rendered.yaml | sort -u
+            # Engine tags must be the chart appVersion or its -xs build, so a stale tag after an upstream rebase fails here.
+            while read -r tag; do
+              if [[ "$tag" != "$APP_VERSION" && "$tag" != "$APP_VERSION"-xs.* ]]; then
+                echo "::error::engine image tag $tag does not match appVersion $APP_VERSION (${f:-defaults})"
+                status=1
+              fi
+            done < <(grep -oE "ghcr\.io/xscaler/${ENGINE}:[^\"' ]+" rendered.yaml | sort -u | sed 's/^[^:]*://')
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  publish:
+    name: Publish ${{ matrix.chart }}
+    needs: [lint, template]
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/ci/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.ref == 'refs/heads/main' && 'release' || 'rehearsal' }}
+    concurrency:
+      group: xs-charts-publish-${{ github.ref == 'refs/heads/main' && 'release' || 'rehearsal' }}-${{ matrix.chart }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chart: loki
+            engine: loki
+          - chart: tempo-distributed
+            engine: tempo
+    env:
+      CHART: ${{ matrix.chart }}
+      ENGINE: ${{ matrix.engine }}
+      CERT_ISSUER: https://token.actions.githubusercontent.com
+      WORKFLOW_REF: ${{ github.ref }}
+      EVENT_SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned tools
+        uses: ./.github/actions/xs-tools
+
+      # release: main pushes publish the chart version to oci://ghcr.io/xscaler/charts.
+      # rehearsal: ci/** pushes publish <version>+rehearsal.<shortsha> to oci://ghcr.io/xscaler/rehearsal/charts.
+      # Helm stores the chart version with "+" replaced by "_" as the OCI tag.
+      - name: Resolve target
+        id: meta
+        run: |
+          set -euo pipefail
+          chart_version="$(helm show chart "charts/$CHART" | sed -n 's/^version: *//p' | tr -d '"')"
+          if [ "$WORKFLOW_REF" = "refs/heads/main" ]; then
+            mode=release
+            repo="ghcr.io/xscaler/charts"
+            version="$chart_version"
+          else
+            mode=rehearsal
+            repo="ghcr.io/xscaler/rehearsal/charts"
+            version="${chart_version%%+*}+rehearsal.${EVENT_SHA:0:7}"
+          fi
+          {
+            echo "mode=$mode"
+            echo "repo=$repo"
+            echo "version=$version"
+            echo "tag=${version//+/_}"
+            echo "pkg=${repo#ghcr.io/xscaler/}/$CHART"
+            echo "identity=https://github.com/xscaler/helm-charts/.github/workflows/xs-charts.yml@${WORKFLOW_REF}"
+          } >> "$GITHUB_OUTPUT"
+          echo "$mode: $repo/$CHART $version"
+
+      - name: Log in to GHCR
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          printf '%s' "$REGISTRY_TOKEN" | crane auth login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          printf '%s' "$REGISTRY_TOKEN" | cosign login ghcr.io --username "$REGISTRY_USER" --password-stdin
+
+      - name: helm dependency build
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm dependency build "charts/$CHART"
+
+      # Every ghcr.io/xscaler/<engine> image any ci values file renders must exist and be one the engine
+      # release workflow built: cosign verify with the exact engine release identity plus a build provenance
+      # attestation. A missing image ends the job without failing it on main (re-run after the engine release);
+      # an existing image that does not verify fails. Rehearsal tolerates missing engine images with a warning.
+      - name: Check the engine images
+        id: engine
+        env:
+          MODE: ${{ steps.meta.outputs.mode }}
+        run: |
+          set -euo pipefail
+          engine_identity="https://github.com/xscaler/${ENGINE}/.github/workflows/xs-release.yml@refs/heads/main"
+          list="$RUNNER_TEMP/engine-images.txt"
+          : > "$list"
+          for f in "charts/$CHART"/ci/*-values.yaml; do
+            if [ -f "$f" ]; then
+              helm template "$CHART" "charts/$CHART" --values "$f" \
+                | { grep -oE "ghcr\.io/xscaler/${ENGINE}[:@][^\"' ]+" || true; } >> "$list"
+            fi
+          done
+          sort -u -o "$list" "$list"
+          test -s "$list" || { echo "::error::chart renders no ghcr.io/xscaler/$ENGINE image"; exit 1; }
+          missing=0
+          while read -r ref; do
+            # Absent: no package (404) or MANIFEST_UNKNOWN / NAME_UNKNOWN. Anything else is an error.
+            absent=0
+            set +e
+            api_out="$(gh api "orgs/xscaler/packages/container/$ENGINE" 2>&1)"
+            api_rc=$?
+            set -e
+            if [ "$api_rc" -ne 0 ]; then
+              if printf '%s' "$api_out" | grep -q 'HTTP 404'; then
+                absent=1
+              else
+                printf '%s\n' "$api_out"
+                echo "::error::could not look up package $ENGINE"
+                exit 1
+              fi
+            else
+              set +e
+              out="$(crane digest "$ref" 2>&1)"
+              rc=$?
+              set -e
+              if [ "$rc" -eq 0 ]; then
+                digest="$out"
+              elif printf '%s' "$out" | grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN'; then
+                absent=1
+              else
+                printf '%s\n' "$out"
+                echo "::error::could not check engine image $ref"
+                exit 1
+              fi
+            fi
+            if [ "$absent" -eq 1 ]; then
+              if [ "$MODE" = "rehearsal" ]; then
+                echo "::warning::engine image $ref is not published yet (tolerated in rehearsal)"
+              else
+                echo "::notice::engine image $ref not released yet; re-run after the release"
+                missing=1
+              fi
+              continue
+            fi
+            image="${ref%%[:@]*}@$digest"
+            if ! cosign verify "$image" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity "$engine_identity" > /dev/null; then
+              echo "::error::engine image $ref exists without a valid signature from $engine_identity"
+              exit 1
+            fi
+            if ! gh attestation verify "oci://$image" --repo "xscaler/$ENGINE" \
+                --signer-workflow "xscaler/$ENGINE/.github/workflows/xs-release.yml" > /dev/null; then
+              echo "::error::engine image $ref has no valid build provenance attestation"
+              exit 1
+            fi
+            echo "verified $ref at $digest"
+          done < "$list"
+          if [ "$missing" -eq 1 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Package first (404 means first publish), then the tag. Absent means MANIFEST_UNKNOWN or NAME_UNKNOWN only.
+      # Denied or unauthorized is an error.
+      - name: Check whether the version exists
+        id: exists
+        if: steps.engine.outputs.ready == 'true'
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          PKG: ${{ steps.meta.outputs.pkg }}
+        run: |
+          set -euo pipefail
+          set +e
+          out="$(gh api "orgs/xscaler/packages/container/${PKG//\//%2F}" 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if printf '%s' "$out" | grep -q 'HTTP 404'; then
+              echo "package $PKG does not exist yet, first publish"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            printf '%s\n' "$out"
+            echo "::error::could not look up package $PKG"
+            exit 1
+          fi
+          set +e
+          out="$(crane manifest "$REPO/$CHART:$TAG" 2>&1)"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$out" | grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$out"
+            echo "::error::could not check $REPO/$CHART:$TAG (denied, unauthorized or network error). Check the token permissions and package access."
+            exit 1
+          fi
+
+      # Any run in the repo can write to GHCR and tags are mutable, so an existing version is accepted only if
+      # it carries a valid signature with this workflow's identity. It is never signed here. Later steps use the
+      # verified digest, not the tag.
+      - name: Verify the existing chart signature
+        id: existing
+        if: steps.exists.outputs.exists == 'true'
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          IDENTITY: ${{ steps.meta.outputs.identity }}
+        run: |
+          set -euo pipefail
+          digest="$(crane digest "$REPO/$CHART:$TAG")"
+          if ! cosign verify "$REPO/$CHART@$digest" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity "$IDENTITY" > /dev/null; then
+            echo "::error::$REPO/$CHART:$TAG exists without trusted signature, investigate and publish a new build number (+xs.N). Build metadata has equal semver precedence, so consumers must pin the exact chart version."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "$REPO/$CHART@$digest carries a valid signature from $IDENTITY"
+
+      # A published version is immutable. If it exists, the local chart must match it: the same package files
+      # and the same rendered manifests. Randomly salted bcrypt hashes (htpasswd) are masked in the render.
+      - name: Compare with the published chart
+        if: steps.exists.outputs.exists == 'true'
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.existing.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016
+          mask() { sed -E 's/\$2[aby]\$[0-9]+\$[./A-Za-z0-9]{53}/BCRYPT/g'; }
+          mkdir -p "$RUNNER_TEMP/published" "$RUNNER_TEMP/local"
+          helm pull "oci://$REPO/$CHART@$DIGEST" --untar --untardir "$RUNNER_TEMP/published"
+          # Package the local chart under the published version so the chart labels compare equal.
+          helm package "charts/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/localpkg" > /dev/null
+          tar -xzf "$RUNNER_TEMP/localpkg/$CHART-${VERSION}.tgz" -C "$RUNNER_TEMP/local"
+          status=0
+          # Chart.lock carries a generation timestamp, so it is compared without that line.
+          if ! { diff -r -x Chart.lock "$RUNNER_TEMP/published/$CHART" "$RUNNER_TEMP/local/$CHART" \
+              && diff <(grep -v '^generated:' "$RUNNER_TEMP/published/$CHART/Chart.lock") \
+                      <(grep -v '^generated:' "$RUNNER_TEMP/local/$CHART/Chart.lock"); } > "$RUNNER_TEMP/files.diff"; then
+            head -n 40 "$RUNNER_TEMP/files.diff"
+            echo "::error::published $CHART $VERSION has different package files than the local chart. Publish a new build number (+xs.N)."
+            status=1
+          fi
+          files=("")
+          for f in "charts/$CHART"/ci/*-values.yaml; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
+          for f in "${files[@]}"; do
+            args=()
+            if [ -n "$f" ]; then args=(--values "$f"); fi
+            { helm template "$CHART" "$RUNNER_TEMP/published/$CHART" "${args[@]}" 2>&1 || true; } | mask > "$RUNNER_TEMP/remote.yaml"
+            { helm template "$CHART" "$RUNNER_TEMP/local/$CHART" "${args[@]}" 2>&1 || true; } | mask > "$RUNNER_TEMP/local.yaml"
+            if ! diff -u "$RUNNER_TEMP/remote.yaml" "$RUNNER_TEMP/local.yaml" > "$RUNNER_TEMP/render.diff"; then
+              head -n 40 "$RUNNER_TEMP/render.diff"
+              echo "::error::published $CHART $VERSION renders differently from the local chart (${f:-defaults}). Publish a new build number (+xs.N)."
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Package and push
+        id: push
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm package "charts/$CHART" --version "$VERSION" --destination "$RUNNER_TEMP/pkg"
+          out="$(helm push "$RUNNER_TEMP/pkg/$CHART-${VERSION}.tgz" "oci://$REPO" 2>&1)"
+          printf '%s\n' "$out"
+          digest="$(printf '%s\n' "$out" | sed -n 's/^Digest: *//p' | tail -n1)"
+          case "$digest" in sha256:*) ;; *) echo "::error::no digest in helm push output"; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Only the digest this run pushed is signed, and the tag must still point at it.
+      - name: Sign and verify the pushed chart
+        id: sign
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          IDENTITY: ${{ steps.meta.outputs.identity }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          current="$(crane digest "$REPO/$CHART:$TAG")"
+          if [ "$current" != "$DIGEST" ]; then
+            echo "::error::$REPO/$CHART:$TAG points at $current, this run pushed $DIGEST"
+            exit 1
+          fi
+          ref="$REPO/$CHART@$DIGEST"
+          cosign sign --yes "$ref"
+          cosign verify "$ref" --certificate-oidc-issuer "$CERT_ISSUER" --certificate-identity "$IDENTITY" > /dev/null
+          echo "$ref is signed by $IDENTITY"
+
+      - name: Pull the verified chart
+        if: steps.exists.outputs.exists != ''
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/final"
+          helm pull "oci://$REPO/$CHART@$DIGEST" --destination "$RUNNER_TEMP/final"
+          echo "pulled $CHART $VERSION at $DIGEST"
+
+      # A version this run pushed but could not sign must not stay in the registry: it would look published
+      # on the next run. Only the version whose digest this run pushed is deleted.
+      - name: Delete the unsigned version
+        if: (failure() || cancelled()) && steps.push.outcome == 'success' && steps.sign.outcome != 'success'
+        env:
+          PKG: ${{ steps.meta.outputs.pkg }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          enc="${PKG//\//%2F}"
+          ids="$(gh api --paginate "orgs/xscaler/packages/container/$enc/versions?per_page=100" --jq ".[] | select(.name == \"$DIGEST\") | .id")"
+          for id in $ids; do
+            echo "deleting unsigned version $id ($DIGEST)"
+            gh api -X DELETE "orgs/xscaler/packages/container/$enc/versions/$id"
+          done

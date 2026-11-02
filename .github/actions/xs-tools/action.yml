@@ -1,0 +1,65 @@
+name: xs-tools
+description: Install helm, crane, cosign, chart-testing and the helm plugins at pinned versions, each verified by sha256 (linux amd64).
+outputs:
+  ct-etc:
+    description: Directory holding the chart-testing chart_schema.yaml and lintconf.yaml.
+    value: ${{ steps.tools.outputs.ct-etc }}
+runs:
+  using: composite
+  steps:
+    - name: Install pinned tools
+      id: tools
+      shell: bash
+      env:
+        TOOLS_DIR: ${{ runner.temp }}/xs-tools
+      run: |
+        set -euo pipefail
+        mkdir -p "$TOOLS_DIR/dl"
+        cd "$TOOLS_DIR/dl"
+
+        # fetch <url> <sha256>: download and verify before anything is unpacked.
+        fetch() {
+          local url="$1" sha="$2" file
+          file="$(basename "$url")"
+          curl --fail --silent --show-error --location --retry 3 --output "$file" "$url"
+          echo "$sha  $file" | sha256sum --check --strict -
+        }
+
+        HELM_VERSION=v4.3.1
+        fetch "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+        tar -xzf "helm-${HELM_VERSION}-linux-amd64.tar.gz" linux-amd64/helm
+        sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+
+        CRANE_VERSION=v0.22.1
+        fetch "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+        tar -xzf go-containerregistry_Linux_x86_64.tar.gz crane
+        sudo install -m 0755 crane /usr/local/bin/crane
+
+        COSIGN_VERSION=v3.1.4
+        fetch "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+        sudo install -m 0755 cosign-linux-amd64 /usr/local/bin/cosign
+
+        CT_VERSION=v3.15.0
+        fetch "https://github.com/helm/chart-testing/releases/download/${CT_VERSION}/chart-testing_3.15.0_linux_amd64.tar.gz" 467561730f25fe09d5e6cd09a3e1f6aa759871c657a57602947c716d9be2c583
+        mkdir ct
+        tar -xzf chart-testing_3.15.0_linux_amd64.tar.gz -C ct
+        sudo install -m 0755 ct/ct /usr/local/bin/ct
+        echo "ct-etc=$TOOLS_DIR/dl/ct/etc" >> "$GITHUB_OUTPUT"
+
+        hash -r
+
+        # Helm plugins are unpacked from verified release archives instead of `helm plugin install`
+        # from a mutable git tag.
+        plugins="$(helm env HELM_PLUGINS)"
+        mkdir -p "$plugins/helm-unittest" "$plugins/helm-values-schema-json"
+        fetch "https://github.com/helm-unittest/helm-unittest/releases/download/v1.2.1/helm-unittest-linux-amd64-1.2.1.tgz" 48e86ecc1467b009630e5954375e5d8494139f73b466df5fe8c04fa45b634939
+        tar -xzf helm-unittest-linux-amd64-1.2.1.tgz -C "$plugins/helm-unittest"
+        fetch "https://github.com/losisin/helm-values-schema-json/releases/download/v2.6.0/helm-values-schema-json_2.6.0_linux_amd64.tgz" c3447c1be91b987678e70996451b6cf2169b9f44fea8fe670dc0f340281f11e8
+        tar -xzf helm-values-schema-json_2.6.0_linux_amd64.tgz -C "$plugins/helm-values-schema-json"
+
+        command -v helm crane cosign ct
+        helm version --short
+        helm plugin list
+        crane version
+        cosign version | head -n 3
+        ct version | head -n 1

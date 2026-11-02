@@ -59,6 +59,21 @@ Docker image selector for Tempo. Hierarchy based on global, component, and tempo
 {{- $registry := coalesce .component.registry .tempo.registry .global.registry -}}
 {{- $repository := coalesce .component.repository .tempo.repository -}}
 {{- $tag := coalesce .component.tag .tempo.tag .defaultVersion | toString -}}
+{{- /*
+xscaler fork: the default engine repository is xscaler/tempo. When an image still uses that repository, the
+upstream default registry (docker.io) becomes xscaler.engineRegistry and a tag that fell back to the appVersion
+becomes xscaler.engineTag. Overrides are left exactly as upstream resolves them. Only tempo.imageReference
+passes xscaler, so the other images are never touched.
+*/ -}}
+{{- $xs := .xscaler | default dict -}}
+{{- if and $xs.engineRegistry (eq $repository "xscaler/tempo") -}}
+{{- if eq $registry "docker.io" -}}
+{{- $registry = $xs.engineRegistry -}}
+{{- end -}}
+{{- if and $xs.engineTag (empty (coalesce .component.tag .tempo.tag "")) -}}
+{{- $tag = $xs.engineTag -}}
+{{- end -}}
+{{- end -}}
 {{- printf "%s/%s:%s" $registry $repository $tag -}}
 {{- end -}}
 
@@ -119,7 +134,7 @@ Calculate image name based on whether enterprise features are requested.  Fallba
 {{- print "Component section " $componentSection " does not exist" | fail }}
 {{- end }}
 {{- $component := (index .ctx.Values $componentSection).image | default dict }}
-{{- $dict := dict "tempo" $tempo "component" $component "global" .ctx.Values.global.image "defaultVersion" .ctx.Chart.AppVersion -}}
+{{- $dict := dict "tempo" $tempo "component" $component "global" .ctx.Values.global.image "defaultVersion" .ctx.Chart.AppVersion "xscaler" .ctx.Values.xscaler -}}
 {{- include "tempo.tempoImage" $dict -}}
 {{- end -}}
 

@@ -1,3 +1,14 @@
+# xscaler fork: defaults for the engine image built at github.com/xscaler. They apply only while the engine
+# repository is still the xscaler default and no registry or tag is set for it; any override wins as upstream.
+# An explicit `registry: docker.io` counts as "not set" and resolves to engineRegistry. An explicit plain upstream
+# tag with the default xscaler repository points at a tag xscaler does not publish. To use upstream images set the
+# engine repository back to grafana/tempo.
+xscaler:
+  # -- Registry for the default xscaler engine image. Used when no registry is set for it.
+  engineRegistry: ghcr.io
+  # -- Tag for the default xscaler engine image. Used when no tag is set for it.
+  engineTag: 3.1.1-xs.0
+
 global:
   image:
     # -- Overrides the Docker registry globally for all images, excluding enterprise.
@@ -80,7 +91,7 @@ tempo:
     # -- Optional list of imagePullSecrets. Overrides `global.image.pullSecrets`
     pullSecrets: []
     # -- Docker image repository
-    repository: grafana/tempo
+    repository: xscaler/tempo
     # -- Overrides the image tag whose default is the chart's appVersion
     tag: null
     pullPolicy: IfNotPresent

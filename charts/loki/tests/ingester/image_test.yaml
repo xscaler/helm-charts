@@ -17,7 +17,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/grafana/loki:0.0.0
+          value: ghcr.io/xscaler/loki:0.0.0
         template: ingester/workload.yaml
         documentIndex: 0
 
@@ -94,7 +94,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/grafana/loki:write-tag
+          value: ghcr.io/xscaler/loki:write-tag
         template: ingester/workload.yaml
         documentIndex: 0
 
@@ -165,7 +165,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/grafana/loki@sha256:defaultdigest
+          value: ghcr.io/xscaler/loki@sha256:defaultdigest
         template: ingester/workload.yaml
         documentIndex: 0
 
@@ -175,6 +175,6 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: docker.io/grafana/loki@sha256:deadbeef01234567
+          value: ghcr.io/xscaler/loki@sha256:deadbeef01234567
         template: ingester/workload.yaml
         documentIndex: 0

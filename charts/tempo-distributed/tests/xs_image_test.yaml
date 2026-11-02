@@ -1,0 +1,117 @@
+# $schema: https://raw.githubusercontent.com/helm-unittest/helm-unittest/refs/heads/main/schema/helm-testsuite.json
+suite: xscaler engine image
+templates:
+  - distributor/deployment-distributor.yaml
+  - querier/deployment-querier.yaml
+  - query-frontend/deployment-query-frontend.yaml
+  - gateway/deployment-gateway.yaml
+  - gateway/configmap-gateway.yaml
+  - memcached/statefulset-memcached.yaml
+  - configmap-tempo.yaml
+
+tests:
+  - it: defaults to the xscaler engine registry and tag
+    template: distributor/deployment-distributor.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/tempo:3.1.1-xs.0
+
+  - it: keeps the upstream version label
+    template: distributor/deployment-distributor.yaml
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/version"]
+          value: "3.1.1"
+
+  - it: uses the global registry with the xscaler repository and tag
+    template: distributor/deployment-distributor.yaml
+    set:
+      global.image.registry: mirror.local
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: mirror.local/xscaler/tempo:3.1.1-xs.0
+
+  - it: keeps a user tempo.image.registry and leaves the other images on upstream
+    set:
+      tempo.image.registry: my.reg
+      gateway.enabled: true
+      queryFrontend.query.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: my.reg/xscaler/tempo:3.1.1-xs.0
+        template: distributor/deployment-distributor.yaml
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: my.reg/nginxinc/nginx-unprivileged:1.31-alpine
+        template: gateway/deployment-gateway.yaml
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: my.reg/grafana/tempo-query:3.1.1
+        template: query-frontend/deployment-query-frontend.yaml
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: '^my\.reg/memcached:'
+        template: memcached/statefulset-memcached.yaml
+
+  - it: keeps non-engine images on upstream defaults
+    set:
+      gateway.enabled: true
+      queryFrontend.query.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/nginxinc/nginx-unprivileged:1.31-alpine
+        template: gateway/deployment-gateway.yaml
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: docker.io/grafana/tempo-query:3.1.1
+        template: query-frontend/deployment-query-frontend.yaml
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: '^docker\.io/memcached:'
+        template: memcached/statefulset-memcached.yaml
+
+  - it: keeps a user tag
+    template: distributor/deployment-distributor.yaml
+    set:
+      tempo.image.tag: 9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/tempo:9.9.9
+
+  - it: leaves a repository override exactly as upstream
+    set:
+      distributor.image.repository: custom/tempo
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/custom/tempo:3.1.1
+        template: distributor/deployment-distributor.yaml
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/xscaler/tempo:3.1.1-xs.0
+        template: querier/deployment-querier.yaml
+
+  - it: leaves the enterprise image alone
+    template: distributor/deployment-distributor.yaml
+    set:
+      enterprise.enabled: true
+      license.contents: x
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: docker.io/grafana/enterprise-traces:v2.8.13
+
+  - it: honours xscaler.engineRegistry and xscaler.engineTag
+    template: distributor/deployment-distributor.yaml
+    set:
+      xscaler.engineRegistry: other.reg
+      xscaler.engineTag: 1.2.3-xs.4
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: other.reg/xscaler/tempo:1.2.3-xs.4
