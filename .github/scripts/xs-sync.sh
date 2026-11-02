@@ -1097,6 +1097,26 @@ closed_upstream_pr() {
   gh pr list --state closed --limit 100 --json number,state,headRefName,isCrossRepository,author,body | xs_closed_upstream_pr "$1"
 }
 
+
+# xs_marker_set <upstream-sha>: stdin is a PR body. Prints it with the line
+# "<!-- xs-sync:upstream <sha> -->" in place of an earlier marker line, or added at
+# the end when there is none.
+xs_marker_set() {
+  awk -v m="<!-- xs-sync:upstream $1 -->" '
+    /^<!-- xs-sync:upstream [0-9a-f]+ -->\r?$/ { if (!done) print m; done = 1; next }
+    { print }
+    END { if (!done) print m }
+  '
+}
+
+# pr_marker_update <pr> <upstream-sha>: a refresh moved the PR to a new upstream tip;
+# the marker follows, or a later close of the PR would skip the wrong tip.
+pr_marker_update() {
+  local f
+  f="$(mktemp)"
+  gh pr view "$1" --json body --jq .body | xs_marker_set "$2" > "${f}"
+  gh pr edit "$1" --body-file "${f}" > /dev/null
+}
 # xs_workflows_to_disable: stdin is "id<TAB>path<TAB>state" lines (the Actions
 # API). Prints "id<TAB>path" for every active workflow under .github/workflows/
 # that is not ours. A workflow is ours when it is named xs-*.yml and none of the
@@ -1523,6 +1543,7 @@ cmd_build() {
         refreshed="$(api_commit "${up_tree}" "${tree}" "${msg}" "${parents[@]}")"
         if api_ref_set_if "${branch}" "${refreshed}" "${BOT_TIP}"; then
           echo "refreshed PR #${num}: ${branch} -> ${refreshed}"
+          if [[ "${upstream_only}" == true ]]; then pr_marker_update "${num}" "${up_commit}"; fi
           summary "### build-sync: refreshed PR #${num} onto ${base_commit}"
           out result refreshed
           out commit "${refreshed}"

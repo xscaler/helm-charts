@@ -806,6 +806,20 @@ expect "closed pr: from a fork" "" "$(pr 7 CLOSED sync/upstream-20261101 app/xsc
 expect "closed pr: not an upstream head" "" "$(pr 7 CLOSED sync/loki-1.1.0 app/xscaler-gremlin false "$(mrk "${TIP}")" | jlist | xs_closed_upstream_pr "${TIP}")"
 expect "closed pr: marker inside a line is not a marker" "" "$(pr 7 CLOSED sync/upstream-20261101 app/xscaler-gremlin false "see $(mrk "${TIP}") here" | jlist | xs_closed_upstream_pr "${TIP}")"
 expect "closed pr: empty list" "" "$(echo '[]' | xs_closed_upstream_pr "${TIP}")"
+# the marker follows a refresh to a new upstream tip
+expect "marker: replaced" "$(printf 'a\n<!-- xs-sync:upstream %s -->\nb\n' "${TIP}")" "$(printf 'a\n<!-- xs-sync:upstream %s -->\nb\n' "${OLD}" | xs_marker_set "${TIP}")"
+expect "marker: appended" "$(printf 'a\n<!-- xs-sync:upstream %s -->\n' "${TIP}")" "$(printf 'a\n' | xs_marker_set "${TIP}")"
+expect "marker: idempotent" "$(printf 'a\n<!-- xs-sync:upstream %s -->\n' "${TIP}")" "$(printf 'a\n<!-- xs-sync:upstream %s -->\n' "${TIP}" | xs_marker_set "${TIP}")"
+gh() {
+  case "$*" in
+    "pr view 5 "*) printf 'body\n<!-- xs-sync:upstream %s -->\n' "${OLD}" ;;
+    "pr edit 5 "*) while (($#)); do if [[ "$1" == --body-file ]]; then cp "$2" "${scratch}/edited"; fi; shift; done ;;
+    *) echo "unexpected gh $*" >&2; return 1 ;;
+  esac
+}
+pr_marker_update 5 "${TIP}"
+expect "pr_marker_update edits the PR body" "$(printf 'body\n<!-- xs-sync:upstream %s -->' "${TIP}")" "$(cat "${scratch}/edited")"
+unset -f gh
 # the build: tomorrow's sync/upstream-<date> branch is skipped while the closed PR carries the tip
 uargs=(--base-commit "$(G rev-parse main)" --base-tree "${base_tree}" --upstream-commit "${u2}" --upstream-base "${u0}" --upstream-only)
 pr_state() { echo none; }
