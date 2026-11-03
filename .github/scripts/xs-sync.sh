@@ -502,9 +502,12 @@ xs_md_paths() {
 # tag's content.
 xs_content_matches() {
   local p
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-only -z "$1" "$2" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' p; do
     xs_path_allowed "${p}" || return 1
-  done < <(git diff --no-renames --name-only -z "$1" "$2")
+  done < "${gl}"
   return 0
 }
 
@@ -724,9 +727,12 @@ upstream_base() {
   local -a ex=()
   local c
   for c in "${XS_CHARTS[@]}"; do ex+=(":!charts/${c}"); done
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-only -z "${ub}" "${base}" -- . "${ex[@]}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' p; do
     xs_path_allowed "${p}" || die "${p} differs between upstream ${ub} and ${base} and is not a patch path (a squash or rebase merge of a sync PR? Merge sync PRs with a merge commit)"
-  done < <(git diff --no-renames --name-only -z "${ub}" "${base}" -- . "${ex[@]}")
+  done < "${gl}"
   printf '%s\n' "${ub}"
 }
 
@@ -850,6 +856,9 @@ api_call() {
 api_plan() {
   local base="$1" result="$2" meta path omode nmode osha nsha status blob
   local -a deleted=() added=()
+  local gl
+  gl="$(mktemp)"
+  git diff-tree -r -z --no-renames --raw "${base}" "${result}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
     read -r omode nmode osha nsha status <<<"${meta#:}"
     case "${status}" in
@@ -872,7 +881,7 @@ api_plan() {
         ;;
       *) die "unexpected diff status ${status} at ${path}" ;;
     esac
-  done < <(git diff-tree -r -z --no-renames --raw "${base}" "${result}")
+  done < "${gl}"
 
   # A path that turns from file to directory or back cannot go through one
   # tree request with a base tree.
@@ -1142,11 +1151,14 @@ xs_workflows_to_disable() {
 # xs_github_changes <old> <new>: non-xs paths under .github that differ, as "<added|modified|deleted> <path>".
 xs_github_changes() {
   local st p
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-status -z "$1" "$2" -- .github > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' st && IFS= read -r -d '' p; do
     if xs_path_allowed "${p}"; then continue; fi
     case "${st}" in A) st=added ;; D) st=deleted ;; *) st=modified ;; esac
     printf '%s %s\n' "${st}" "${p}"
-  done < <(git diff --no-renames --name-status -z "$1" "$2" -- .github)
+  done < "${gl}"
 }
 
 # pr_state <head-branch>: the state of the PRs from this repository for that head.
@@ -1734,6 +1746,9 @@ rehearsal_cleanup() {
 # first changed line at least <min-first-hunk> lines down (0 = any).
 rehearsal_file() {
   local chart="$1" base="$2" target="$3" expect="$4" min="$5" f first hunks
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-only -z --diff-filter=M "refs/tags/${base}" "refs/tags/${target}" -- "charts/${chart}" ":!charts/${chart}/Chart.yaml" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' f; do
     git cat-file -e "refs/tags/${base}:${f}" 2> /dev/null || continue
     git diff --quiet "refs/tags/${target}" "${expect}" -- "${f}" || continue
@@ -1746,7 +1761,7 @@ rehearsal_file() {
     fi
     printf '%s\n' "${f}"
     return 0
-  done < <(git diff --no-renames --name-only -z --diff-filter=M "refs/tags/${base}" "refs/tags/${target}" -- "charts/${chart}" ":!charts/${chart}/Chart.yaml")
+  done < "${gl}"
   return 1
 }
 
@@ -1845,9 +1860,12 @@ cmd_rehearse() {
     local -a ps=()
     mapfile -d '' ps < <(non_chart_pathspec)
     ub_art=""
+    local gl
+    gl="$(mktemp)"
+    git rev-list --first-parent -n 300 "${m}~1" > "${gl}" || die "${FUNCNAME[0]}: git failed"
     while read -r c; do
       if ! git diff --quiet "${c}" "${m}" -- "${ps[@]}"; then ub_art="${c}"; break; fi
-    done < <(git rev-list --first-parent -n 300 "${m}~1")
+    done < "${gl}"
     [[ -n "${ub_art}" ]] || die "no older upstream main commit differs from ${m} outside the charts"
     echo "rehearsal upstream: base is upstream main ${ub_art}, target ${m}"
   fi
@@ -1995,26 +2013,32 @@ cmd_check() {
       done <<<"${ns}"
       local -a ps=()
       mapfile -d '' ps < <(non_chart_pathspec)
+      local gl
+      gl="$(mktemp)"
+      git diff --no-renames --name-only -z "${up}" "${head}" -- "${ps[@]}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
       while IFS= read -r -d '' p; do
         n=$((n + 1))
         if ! xs_path_allowed "${p}"; then
           echo "::error::${p} differs from upstream main ${up} and is not a patch path"
           bad=$((bad + 1))
         fi
-      done < <(git diff --no-renames --name-only -z "${up}" "${head}" -- "${ps[@]}")
+      done < "${gl}"
       for chart in "${XS_CHARTS[@]}"; do
         tag="$(chart_current_tag "${head}" "${chart}")"
         git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" > /dev/null || die "chart tag ${tag} is missing"
         cur="$(chart_current_tag "${base_ref}" "${chart}")"
         local -A allowed=()
         while IFS= read -r -d '' p; do allowed["${p}"]=1; done < <(git diff --no-renames --name-only -z "refs/tags/${cur}" "${base_ref}" -- "charts/${chart}")
+        local gl
+        gl="$(mktemp)"
+        git diff --no-renames --name-only -z "refs/tags/${tag}" "${head}" -- "charts/${chart}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
         while IFS= read -r -d '' p; do
           n=$((n + 1))
           if [[ -z "${allowed[${p}]:-}" ]]; then
             echo "::error::${p} differs from ${tag} and is not a chart patch path"
             bad=$((bad + 1))
           fi
-        done < <(git diff --no-renames --name-only -z "refs/tags/${tag}" "${head}" -- "charts/${chart}")
+        done < "${gl}"
         unset allowed
       done
       ((bad == 0)) || die "${bad} problem(s): paths outside the patch set differ from upstream, or upstream holds xs namespace paths"
