@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2310,SC2249 # helpers run in if/|| on purpose and case statements without a default are intended
 # xScaler fork: upstream sync logic, shared by xs-sync.yml and xs-sync-check.yml.
 #
 # helm-charts has no repo-wide release tags. The fork's main is "an upstream
@@ -24,7 +25,7 @@
 #   pick <chart> <current-tag> [--cap TAG]
 #                                 pick the chart target from tags on stdin
 #   ghcr-login                    log in to the engine registry with GH_TOKEN
-#   disable-upstream-workflows    disable every active workflow that is not .github/workflows/xs-*
+#   disable-upstream-workflows    disable every active workflow that is not ours
 #   engines [--base REF]          per chart: the verified engine release for main's appVersion
 #   detect [--base REF] [--upstream REF] [--open-heads FILE] [--cap TAG]...
 #                                 per chart: current tag, newest released target
@@ -73,6 +74,15 @@ XS_PATCH_PATHS=(
   ".github/scripts/xs-*"
   ".github/actions/xs-*"
 )
+# The namespace upstream must never own: paths that only this fork may carry.
+# Shell globs like XS_PATCH_PATHS, but workflows, scripts and actions only (not
+# chart paths). A path here must be identical in main and in a sync result, and
+# absent from every upstream tree.
+XS_NS_PATHS=(
+  ".github/workflows/xs-*"
+  ".github/scripts/xs-*"
+  ".github/actions/xs-*"
+)
 # Our charts: chart directory under charts/ and the engine image it deploys.
 XS_CHARTS=(loki tempo-distributed)
 declare -A XS_CHART_ENGINE=([loki]=loki [tempo-distributed]=tempo)
@@ -98,6 +108,12 @@ XS_BINARY_PKG="${XS_BINARY_PKG-}"
 XS_BINARY_NAME="${XS_BINARY_NAME:-}"
 XS_HELP_FLAGS="${XS_HELP_FLAGS:--help}"
 # ---------------------------------------------------------------------------
+
+# Who opens the issues the bot looks up by title. gh --author slugs: the App for
+# sync issues, the Actions bot for the failure issue (its job holds GITHUB_TOKEN).
+# Outsiders can open issues on a public repo; a title match alone is not trusted.
+XS_ISSUE_AUTHOR="${XS_ISSUE_AUTHOR:-app/xscaler-gremlin}"
+XS_ISSUE_AUTHOR_ACTIONS="${XS_ISSUE_AUTHOR_ACTIONS:-app/github-actions}"
 
 XS_MAIN_BRANCH="${XS_MAIN_BRANCH:-main}"
 XS_UPSTREAM_REMOTE="xs-upstream"
@@ -486,9 +502,12 @@ xs_md_paths() {
 # tag's content.
 xs_content_matches() {
   local p
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-only -z "$1" "$2" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' p; do
     xs_path_allowed "${p}" || return 1
-  done < <(git diff --no-renames --name-only -z "$1" "$2")
+  done < "${gl}"
   return 0
 }
 
@@ -571,6 +590,26 @@ mirror_batches() {
   done
 }
 
+# mirror_ns_check <ref>...: upstream main and the given refs (the tags mirrored in
+# this run) must not contain paths in the xs namespace. They are mirrored anyway
+# (mirrors are data), but pushing a branch that holds such a workflow can run it
+# with the push's context, so the run fails and a human looks. Main is checked on
+# every run, so the failure repeats until upstream drops the path.
+mirror_ns_check() {
+  local ref bad=0 list
+  retry 3 git fetch --no-tags "${XS_UPSTREAM_REMOTE}" "+refs/heads/main:refs/remotes/${XS_UPSTREAM_REMOTE}/main" || die "cannot fetch upstream main"
+  for ref in "refs/remotes/${XS_UPSTREAM_REMOTE}/main" "$@"; do
+    git rev-parse --verify --quiet "${ref}^{commit}" > /dev/null || continue
+    list="$(xs_ns_violations "${ref}")" || die "cannot list the tree of ${ref}"
+    [[ -n "${list}" ]] || continue
+    bad=$((bad + 1))
+    printf '::error::upstream %s holds paths in the xs namespace: %s\n' "${ref#refs/}" "$(head -n 10 <<<"${list}" | tr '\n' ';')" >&2
+    summary "upstream ${ref#refs/} holds paths in the xs namespace (mirrored anyway, review them):"
+    summary "$(head -n 20 <<<"${list}" | sed 's/^/- /')"
+  done
+  ((bad == 0))
+}
+
 cmd_mirror() {
   local dry=false
   [[ "${1:-}" == "--dry-run" ]] && dry=true
@@ -588,7 +627,7 @@ cmd_mirror() {
 
   # Branches: upstream <b> -> origin upstream/<b>, only when the sha differs.
   local sha ref name cur
-  local -a b_fetch=() b_push=() b_names=()
+  local -a b_fetch=() b_push=() b_names=() ns_refs=()
   while read -r sha ref; do
     name="${ref#refs/heads/}"
     [[ "${name}" =~ ${XS_BRANCH_REGEX} ]] || continue
@@ -609,6 +648,7 @@ cmd_mirror() {
     t_fetch+=("refs/tags/${name}:refs/tags/${name}")
     t_push+=("refs/tags/${name}:refs/tags/${name}") # no force: existing tags are never moved
     t_names+=("tag ${name}")
+    ns_refs+=("refs/tags/${name}")
   done < "${up_tags}"
   echo "new tags: ${#t_names[@]}"
   if ((${#t_names[@]} > 0)); then printf '  %s\n' "${t_names[@]:0:40}"; fi
@@ -631,11 +671,14 @@ cmd_mirror() {
 
   mirror_batches b_fetch b_push b_names
   mirror_batches t_fetch t_push t_names
+  local rc=0
   if ((${#MIRROR_FAILED[@]} > 0)); then
     printf '::error::mirror failed for: %s\n' "${MIRROR_FAILED[*]}" >&2
     summary "mirror failed for: ${MIRROR_FAILED[*]}"
-    return 1
+    rc=1
   fi
+  mirror_ns_check "${ns_refs[@]}" || rc=1
+  ((rc == 0)) || return 1
   echo "mirror done"
 }
 
@@ -684,9 +727,12 @@ upstream_base() {
   local -a ex=()
   local c
   for c in "${XS_CHARTS[@]}"; do ex+=(":!charts/${c}"); done
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-only -z "${ub}" "${base}" -- . "${ex[@]}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' p; do
     xs_path_allowed "${p}" || die "${p} differs between upstream ${ub} and ${base} and is not a patch path (a squash or rebase merge of a sync PR? Merge sync PRs with a merge commit)"
-  done < <(git diff --no-renames --name-only -z "${ub}" "${base}" -- . "${ex[@]}")
+  done < "${gl}"
   printf '%s\n' "${ub}"
 }
 
@@ -810,6 +856,9 @@ api_call() {
 api_plan() {
   local base="$1" result="$2" meta path omode nmode osha nsha status blob
   local -a deleted=() added=()
+  local gl
+  gl="$(mktemp)"
+  git diff-tree -r -z --no-renames --raw "${base}" "${result}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
     read -r omode nmode osha nsha status <<<"${meta#:}"
     case "${status}" in
@@ -832,7 +881,7 @@ api_plan() {
         ;;
       *) die "unexpected diff status ${status} at ${path}" ;;
     esac
-  done < <(git diff-tree -r -z --no-renames --raw "${base}" "${result}")
+  done < "${gl}"
 
   # A path that turns from file to directory or back cannot go through one
   # tree request with a base tree.
@@ -977,6 +1026,51 @@ branch_guard() {
     die "$1 exists and is not a sync commit for this run; not overwriting it. Delete the branch if it is stale and re-run"
 }
 
+# xs_ns_path <path>: true when the path is in the xs namespace.
+xs_ns_path() {
+  local p="$1" rule
+  for rule in "${XS_NS_PATHS[@]}"; do
+    # shellcheck disable=SC2254 # the rule is a glob on purpose
+    case "${p}" in ${rule}) return 0 ;; *) ;; esac
+  done
+  return 1
+}
+
+# xs_ns_paths <commit-ish>: NUL separated xs namespace paths in its tree. Fails when
+# git cannot read the tree, so a git error never reads as "no such paths".
+xs_ns_paths() {
+  local list p
+  list="$(mktemp)"
+  if ! git ls-tree -r --name-only -z "$1" -- .github > "${list}"; then
+    rm -f "${list}"
+    return 1
+  fi
+  while IFS= read -r -d '' p; do
+    if xs_ns_path "${p}"; then printf '%s\0' "${p}"; fi
+  done < "${list}"
+  rm -f "${list}"
+}
+
+# xs_ns_violations <upstream-commit> [<base-tree> <result-tree>]: one line per
+# problem, nothing when clean. Upstream must not carry any path in the xs
+# namespace; with the trees, the namespace must also be byte-identical between
+# main and the sync result. Paths are shown with control characters replaced.
+xs_ns_violations() {
+  local up="$1" base="${2:-}" result="${3:-}" p list
+  list="$(mktemp)"
+  xs_ns_paths "${up}" > "${list}" || { rm -f "${list}"; return 1; }
+  while IFS= read -r -d '' p; do
+    printf 'upstream %s contains %s\n' "${up}" "${p//[[:cntrl:]]/?}"
+  done < "${list}"
+  if [[ -n "${base}" && -n "${result}" ]]; then
+    git diff --no-renames --name-only -z "${base}" "${result}" -- .github > "${list}" || { rm -f "${list}"; return 1; }
+    while IFS= read -r -d '' p; do
+      if xs_ns_path "${p}"; then printf 'result differs from main at %s\n' "${p//[[:cntrl:]]/?}"; fi
+    done < "${list}"
+  fi
+  rm -f "${list}"
+}
+
 # xs_neutralize: stdin to stdout with @, < and > made inert and backtick runs replaced.
 xs_neutralize() {
   sed -e 's/@/@\xe2\x80\x8b/g' -e 's/</\xe2\x80\xb9/g' -e 's/>/\xe2\x80\xba/g' -e "s/\`\\+/'/g"
@@ -991,13 +1085,65 @@ xs_pr_state() {
     | if $o then "open \($o.number)" elif $m then "merged \($m.number)" elif $c then "closed \($c.number)" else "none" end'
 }
 
-# xs_workflows_to_disable: stdin is "id<TAB>path<TAB>state" lines; prints the active workflows that are not .github/workflows/xs-*.yml.
+# xs_closed_upstream_pr <upstream-sha>: stdin is `gh pr list --state closed --json
+# number,state,headRefName,isCrossRepository,author,body`. Prints the number of the
+# newest PR that was closed without merging, has a sync/upstream-* head in this
+# repository, was opened by the bot (XS_ISSUE_AUTHOR) and records that upstream tip
+# in its body as the line "<!-- xs-sync:upstream <sha> -->". Empty when there is none.
+# A closed PR is an explicit skip for that upstream tip, whatever day the next
+# sync/upstream-<date> branch is named.
+xs_closed_upstream_pr() {
+  jq -r --arg a "${XS_ISSUE_AUTHOR}" --arg m "<!-- xs-sync:upstream $1 -->" \
+    '[.[] | select(.isCrossRepository == false and .state == "CLOSED"
+        and (.headRefName | startswith("sync/upstream-")) and .author.login == $a
+        and ((.body // "") | split("\n") | map(rtrimstr("\r")) | index($m)))]
+      | map(.number) | max // empty'
+}
+
+# closed_upstream_pr <upstream-sha>: see xs_closed_upstream_pr.
+closed_upstream_pr() {
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]] || die "bad upstream sha $1"
+  gh pr list --state closed --limit 100 --json number,state,headRefName,isCrossRepository,author,body | xs_closed_upstream_pr "$1"
+}
+
+
+# xs_marker_set <upstream-sha>: stdin is a PR body. Prints it with the line
+# "<!-- xs-sync:upstream <sha> -->" in place of an earlier marker line, or added at
+# the end when there is none.
+xs_marker_set() {
+  awk -v m="<!-- xs-sync:upstream $1 -->" '
+    /^<!-- xs-sync:upstream [0-9a-f]+ -->\r?$/ { if (!done) print m; done = 1; next }
+    { print }
+    END { if (!done) print m }
+  '
+}
+
+# pr_marker_update <pr> <upstream-sha>: a refresh moved the PR to a new upstream tip;
+# the marker follows, or a later close of the PR would skip the wrong tip.
+pr_marker_update() {
+  local f
+  f="$(mktemp)"
+  gh pr view "$1" --json body --jq .body | xs_marker_set "$2" > "${f}"
+  gh pr edit "$1" --body-file "${f}" > /dev/null
+}
+# xs_workflows_to_disable: stdin is "id<TAB>path<TAB>state" lines (the Actions
+# API). Prints "id<TAB>path" for every active workflow under .github/workflows/
+# that is not ours. A workflow is ours when it is named xs-*.yml and none of the
+# refs in XS_UPSTREAM_REFS (space separated: upstream main and the base tag)
+# contains that path; an upstream file in our namespace stays disabled. Dynamic
+# workflows (no such path) are left alone.
 xs_workflows_to_disable() {
-  local id path state
+  local id path state ref theirs
   while IFS=$'\t' read -r id path state; do
     [[ "${state}" == active ]] || continue
     [[ "${path}" == .github/workflows/* ]] || continue
-    [[ "${path}" =~ ^\.github/workflows/xs-[A-Za-z0-9._-]+\.ya?ml$ ]] && continue
+    if [[ "${path}" =~ ^\.github/workflows/xs-[A-Za-z0-9._-]+\.ya?ml$ ]]; then
+      theirs=false
+      for ref in ${XS_UPSTREAM_REFS:-}; do
+        if git cat-file -e "${ref}:${path}" 2> /dev/null; then theirs=true; fi
+      done
+      [[ "${theirs}" == true ]] || continue
+    fi
     printf '%s\t%s\n' "${id}" "${path}"
   done
 }
@@ -1005,11 +1151,14 @@ xs_workflows_to_disable() {
 # xs_github_changes <old> <new>: non-xs paths under .github that differ, as "<added|modified|deleted> <path>".
 xs_github_changes() {
   local st p
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-status -z "$1" "$2" -- .github > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' st && IFS= read -r -d '' p; do
     if xs_path_allowed "${p}"; then continue; fi
     case "${st}" in A) st=added ;; D) st=deleted ;; *) st=modified ;; esac
     printf '%s %s\n' "${st}" "${p}"
-  done < <(git diff --no-renames --name-status -z "$1" "$2" -- .github)
+  done < "${gl}"
 }
 
 # pr_state <head-branch>: the state of the PRs from this repository for that head.
@@ -1025,10 +1174,14 @@ pr_find() {
     --jq '[.[] | select(.isCrossRepository == false)][0].number // empty'
 }
 
-# issue_find <exact-title>: number of the open issue with that title.
+# issue_find <exact-title> <label> [author]: number of the open issue with that
+# title, our label and an author the bot owns (default the App; the failure issue
+# is opened with GITHUB_TOKEN, so it passes XS_ISSUE_AUTHOR_ACTIONS). Anyone can
+# open an issue on a public repo, so the title alone proves nothing.
 issue_find() {
   [[ "$1" =~ ^[A-Za-z0-9\ ._:()/-]+$ ]] || die "bad issue title $1"
-  gh issue list --state open --search "\"$1\" in:title" --limit 30 --json number,title \
+  [[ -n "${2:-}" ]] || die "issue_find needs a label"
+  gh issue list --state open --author "${3:-${XS_ISSUE_AUTHOR}}" --label "$2" --search "\"$1\" in:title" --limit 30 --json number,title \
     --jq "map(select(.title == \"$1\")) | .[0].number // empty"
 }
 
@@ -1039,7 +1192,7 @@ issue_find() {
 ISSUE_NUMBER=""
 issue_upsert() {
   local title="$1" label="$2" body="$3" num url
-  num="$(issue_find "${title}")"
+  num="$(issue_find "${title}" "${label}")"
   if [[ -n "${num}" ]]; then
     gh issue edit "${num}" --body-file "${body}" > /dev/null
     echo "updated issue #${num}"
@@ -1294,6 +1447,18 @@ cmd_build() {
         ;;
       "merged "*) die "${branch} has merged PR #${pr_st#merged }, but main does not hold its content. Merge sync PRs with a merge commit" ;;
     esac
+    # An upstream refresh closed without merging is skipped for that upstream tip, not
+    # just for the day: tomorrow's sync/upstream-<date> branch has a new name.
+    if [[ "${upstream_only}" == true && "${pr_st}" != "open "* ]]; then
+      local closed_pr
+      closed_pr="$(closed_upstream_pr "${up_commit}")"
+      if [[ -n "${closed_pr}" ]]; then
+        echo "skipped by closed PR #${closed_pr}"
+        summary "### build-sync: skipped by closed PR #${closed_pr} (upstream main ${up_commit}). Reopen it, or wait for upstream to move."
+        out result skipped
+        return 0
+      fi
+    fi
   fi
 
   local work index files_file nfiles up_tree
@@ -1301,6 +1466,11 @@ cmd_build() {
   index="${work}/index"
   files_file="${work}/files"
   up_tree="$(git rev-parse "${up_commit}^{tree}")"
+  # Upstream never owns our namespace: a commit that carries an xs-* workflow, script
+  # or action would land on main as one of ours.
+  local ns
+  ns="$(xs_ns_violations "${up_commit}")" || die "cannot list the xs namespace of ${up_commit}"
+  [[ -z "${ns}" ]] || die "upstream main ${up_commit} holds paths in the xs namespace, which only this fork may own: $(head -n 20 <<<"${ns}" | tr '\n' ';')"
   xs_patch_files "${up_base}" "${base_tree}" "${cmp[@]}" > "${files_file}"
   nfiles="$(tr -cd '\0' < "${files_file}" | wc -c)"
   echo "patch: ${nfiles} file(s)"
@@ -1343,6 +1513,8 @@ cmd_build() {
     return 0
   fi
   echo "result tree ${tree}"
+  ns="$(xs_ns_violations "${up_commit}" "${base_tree}" "${tree}")" || die "cannot compare the xs namespace of main and the result"
+  [[ -z "${ns}" ]] || die "the sync result changes the xs namespace of ${XS_MAIN_BRANCH}: $(head -n 20 <<<"${ns}" | tr '\n' ';')"
 
   local -a parents=("${base_commit}")
   if [[ "${up_commit}" != "${up_base}" ]]; then parents+=("${up_commit}"); fi
@@ -1383,6 +1555,7 @@ cmd_build() {
         refreshed="$(api_commit "${up_tree}" "${tree}" "${msg}" "${parents[@]}")"
         if api_ref_set_if "${branch}" "${refreshed}" "${BOT_TIP}"; then
           echo "refreshed PR #${num}: ${branch} -> ${refreshed}"
+          if [[ "${upstream_only}" == true ]]; then pr_marker_update "${num}" "${up_commit}"; fi
           summary "### build-sync: refreshed PR #${num} onto ${base_commit}"
           out result refreshed
           out commit "${refreshed}"
@@ -1423,7 +1596,7 @@ cmd_build() {
   if [[ "${open_pr}" == true ]]; then
     # A conflict issue for this head is resolved now.
     local old
-    old="$(issue_find "${issue_title}" || true)"
+    old="$(issue_find "${issue_title}" "${issue_label}" || true)"
     if [[ -n "${old}" ]]; then
       gh issue close "${old}" --comment "The patch set applies now; sync PR follows." > /dev/null
     fi
@@ -1431,6 +1604,7 @@ cmd_build() {
     {
       if [[ "${upstream_only}" == true ]]; then
         echo "Upstream refresh: the charts stay as they are, the rest of the repository moves to upstream main."
+        echo "<!-- xs-sync:upstream ${up_commit} -->"
       else
         echo "Chart changes (a chart is bumped or rebuilt only when its engine image ${XS_ENGINE_REGISTRY}/${XS_ENGINE_ORG}/<engine>:<appVersion>-xs.N is released, signed and attested by the engine release workflow):"
         echo
@@ -1467,7 +1641,7 @@ cmd_build() {
       echo
       if ((ngh > 0)); then
         echo "Upstream workflows and scripts that changed between upstream main ${up_base} and ${up_commit}."
-        echo "Upstream workflows stay disabled: xs-sync disables any that are not xs-*.yml on its next run."
+        echo "Upstream workflows stay disabled: xs-sync disables any that are not ours on its next run."
         echo
         echo '```'
         awk 'NR <= 200' "${gh_changes}" | xs_neutralize
@@ -1488,8 +1662,18 @@ cmd_build() {
 # disable-upstream-workflows
 # ---------------------------------------------------------------------------
 cmd_disable_workflows() {
-  local repo id path failed=0
+  local repo id path failed=0 base ref
   repo="$(repo_slug)"
+  # Upstream refs that decide whether an xs-* workflow is ours: upstream main and the
+  # upstream commit main is based on. A missing ref stops the job: guessing would
+  # either disable our workflows or leave an upstream one active.
+  git rev-parse --verify --quiet "origin/upstream/main^{commit}" > /dev/null || die "origin/upstream/main is missing; fetch the full history"
+  base="$(git merge-base HEAD origin/upstream/main)" || die "HEAD and origin/upstream/main share no history"
+  XS_UPSTREAM_REFS="origin/upstream/main ${base}"
+  for ref in ${XS_UPSTREAM_REFS}; do
+    git rev-parse --verify --quiet "${ref}^{commit}" > /dev/null || die "${ref} is missing; fetch the full history"
+  done
+  export XS_UPSTREAM_REFS
   while IFS=$'\t' read -r id path; do
     if gh api --method PUT "repos/${repo}/actions/workflows/${id}/disable" > /dev/null; then
       echo "disabled ${path} (${id})"
@@ -1520,7 +1704,7 @@ cmd_supersede() {
     else
       echo "::warning::${head} has no open PR from this repository; its branch is left alone"
     fi
-    num="$(issue_find "sync: ${head#sync/} conflicts" || true)"
+    num="$(issue_find "sync: ${head#sync/} conflicts" sync-conflict || true)"
     if [[ -n "${num}" ]]; then gh issue close "${num}" --comment "superseded by ${latest}" > /dev/null; fi
   done
 }
@@ -1553,7 +1737,7 @@ REHEARSAL_ISSUE=""
 rehearsal_cleanup() {
   local n="${REHEARSAL_ISSUE}"
   if [[ -n "${REHEARSAL_BRANCH}" ]]; then api_ref_delete "${REHEARSAL_BRANCH}" || true; fi
-  if [[ -z "${n}" && -n "${REHEARSAL_TITLE}" ]]; then n="$(issue_find "${REHEARSAL_TITLE}" || true)"; fi
+  if [[ -z "${n}" && -n "${REHEARSAL_TITLE}" ]]; then n="$(issue_find "${REHEARSAL_TITLE}" rehearsal || true)"; fi
   if [[ -n "${n}" ]]; then gh issue close "${n}" --comment "rehearsal finished" > /dev/null || true; fi
 }
 
@@ -1562,6 +1746,9 @@ rehearsal_cleanup() {
 # first changed line at least <min-first-hunk> lines down (0 = any).
 rehearsal_file() {
   local chart="$1" base="$2" target="$3" expect="$4" min="$5" f first hunks
+  local gl
+  gl="$(mktemp)"
+  git diff --no-renames --name-only -z --diff-filter=M "refs/tags/${base}" "refs/tags/${target}" -- "charts/${chart}" ":!charts/${chart}/Chart.yaml" > "${gl}" || die "${FUNCNAME[0]}: git failed"
   while IFS= read -r -d '' f; do
     git cat-file -e "refs/tags/${base}:${f}" 2> /dev/null || continue
     git diff --quiet "refs/tags/${target}" "${expect}" -- "${f}" || continue
@@ -1574,7 +1761,7 @@ rehearsal_file() {
     fi
     printf '%s\n' "${f}"
     return 0
-  done < <(git diff --no-renames --name-only -z --diff-filter=M "refs/tags/${base}" "refs/tags/${target}" -- "charts/${chart}" ":!charts/${chart}/Chart.yaml")
+  done < "${gl}"
   return 1
 }
 
@@ -1673,9 +1860,12 @@ cmd_rehearse() {
     local -a ps=()
     mapfile -d '' ps < <(non_chart_pathspec)
     ub_art=""
+    local gl
+    gl="$(mktemp)"
+    git rev-list --first-parent -n 300 "${m}~1" > "${gl}" || die "${FUNCNAME[0]}: git failed"
     while read -r c; do
       if ! git diff --quiet "${c}" "${m}" -- "${ps[@]}"; then ub_art="${c}"; break; fi
-    done < <(git rev-list --first-parent -n 300 "${m}~1")
+    done < "${gl}"
     [[ -n "${ub_art}" ]] || die "no older upstream main commit differs from ${m} outside the charts"
     echo "rehearsal upstream: base is upstream main ${ub_art}, target ${m}"
   fi
@@ -1812,31 +2002,46 @@ cmd_check() {
       up="$(head_upstream "${head}")"
       bad=0
       n=0
+      # Upstream must not own our namespace: the upstream commit this head is built
+      # on holds no xs-* workflow, script or action.
+      local ns line
+      ns="$(xs_ns_violations "${up}")" || die "cannot list the xs namespace of ${up}"
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        echo "::error::${line}"
+        bad=$((bad + 1))
+      done <<<"${ns}"
       local -a ps=()
       mapfile -d '' ps < <(non_chart_pathspec)
+      local gl
+      gl="$(mktemp)"
+      git diff --no-renames --name-only -z "${up}" "${head}" -- "${ps[@]}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
       while IFS= read -r -d '' p; do
         n=$((n + 1))
         if ! xs_path_allowed "${p}"; then
           echo "::error::${p} differs from upstream main ${up} and is not a patch path"
           bad=$((bad + 1))
         fi
-      done < <(git diff --no-renames --name-only -z "${up}" "${head}" -- "${ps[@]}")
+      done < "${gl}"
       for chart in "${XS_CHARTS[@]}"; do
         tag="$(chart_current_tag "${head}" "${chart}")"
         git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" > /dev/null || die "chart tag ${tag} is missing"
         cur="$(chart_current_tag "${base_ref}" "${chart}")"
         local -A allowed=()
         while IFS= read -r -d '' p; do allowed["${p}"]=1; done < <(git diff --no-renames --name-only -z "refs/tags/${cur}" "${base_ref}" -- "charts/${chart}")
+        local gl
+        gl="$(mktemp)"
+        git diff --no-renames --name-only -z "refs/tags/${tag}" "${head}" -- "charts/${chart}" > "${gl}" || die "${FUNCNAME[0]}: git failed"
         while IFS= read -r -d '' p; do
           n=$((n + 1))
           if [[ -z "${allowed[${p}]:-}" ]]; then
             echo "::error::${p} differs from ${tag} and is not a chart patch path"
             bad=$((bad + 1))
           fi
-        done < <(git diff --no-renames --name-only -z "refs/tags/${tag}" "${head}" -- "charts/${chart}")
+        done < "${gl}"
         unset allowed
       done
-      ((bad == 0)) || die "${bad} path(s) outside the patch set differ from upstream"
+      ((bad == 0)) || die "${bad} problem(s): paths outside the patch set differ from upstream, or upstream holds xs namespace paths"
       echo "identity OK: ${n} path(s) differ from upstream main ${up} and the chart tags, all inside the patch set"
       summary "identity: ${n} path(s) differ from upstream main ${up} and the chart tags, all inside the patch set"
       ;;
@@ -1989,7 +2194,7 @@ cmd_issue_failed() {
   local url="${1:?run url required}" num title="sync: failed"
   [[ "${url}" =~ ^https://github\.com/[A-Za-z0-9._/-]+$ ]] || die "bad run url"
   ensure_label sync-failed D93F0B "xs-sync run failed"
-  num="$(issue_find "${title}")"
+  num="$(issue_find "${title}" sync-failed "${XS_ISSUE_AUTHOR_ACTIONS}")"
   if [[ -n "${num}" ]]; then
     gh issue comment "${num}" --body "Failed again: ${url}" > /dev/null
     echo "commented on #${num}"
