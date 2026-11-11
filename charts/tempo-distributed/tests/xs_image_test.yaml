@@ -15,7 +15,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/xscaler/tempo:3.1.1-xs.0
+          value: ghcr.io/xscaler/tempo:3.1.1-xs.2
 
   - it: keeps the upstream version label
     template: distributor/deployment-distributor.yaml
@@ -31,7 +31,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: mirror.local/xscaler/tempo:3.1.1-xs.0
+          value: mirror.local/xscaler/tempo:3.1.1-xs.2
 
   - it: keeps a user tempo.image.registry and leaves the other images on upstream
     set:
@@ -41,7 +41,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: my.reg/xscaler/tempo:3.1.1-xs.0
+          value: my.reg/xscaler/tempo:3.1.1-xs.2
         template: distributor/deployment-distributor.yaml
       - equal:
           path: spec.template.spec.containers[0].image
@@ -93,7 +93,7 @@ tests:
         template: distributor/deployment-distributor.yaml
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/xscaler/tempo:3.1.1-xs.0
+          value: ghcr.io/xscaler/tempo:3.1.1-xs.2
         template: querier/deployment-querier.yaml
 
   - it: leaves the enterprise image alone
