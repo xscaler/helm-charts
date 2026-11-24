@@ -15,7 +15,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/xscaler/loki:3.7.9-xs.0
+          value: ghcr.io/xscaler/loki:3.7.9-xs.2
         template: monolithic/workload.yaml
 
   - it: keeps the upstream version label
@@ -40,7 +40,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: mirror.local/xscaler/loki:3.7.9-xs.0
+          value: mirror.local/xscaler/loki:3.7.9-xs.2
         template: monolithic/workload.yaml
 
   - it: keeps a user registry and swaps only the tag
@@ -49,7 +49,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: my.reg/xscaler/loki:3.7.9-xs.0
+          value: my.reg/xscaler/loki:3.7.9-xs.2
         template: monolithic/workload.yaml
 
   - it: keeps a user tag
@@ -95,7 +95,7 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/xscaler/loki:3.7.9-xs.0
+          value: ghcr.io/xscaler/loki:3.7.9-xs.2
         template: monolithic/workload.yaml
 
   - it: treats a null registry like the upstream default
@@ -104,5 +104,5 @@ tests:
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: ghcr.io/xscaler/loki:3.7.9-xs.0
+          value: ghcr.io/xscaler/loki:3.7.9-xs.2
         template: monolithic/workload.yaml
